@@ -2,6 +2,8 @@ node_modules/
 dist/
 vendor/libGD.js
 vendor/libGD.wasm
+third-party/*
+!third-party/package.json
 *.bak-*
 *.tmp-*
 .env

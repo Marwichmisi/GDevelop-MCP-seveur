@@ -41,6 +41,22 @@ Suite opt-in contre le vrai moteur :
 GDEVELOP_LIBGD_PATH=vendor/libGD.js npm test
 ```
 
+## Utilisation dans opencode
+
+`opencode.json` (à la racine) déclare le serveur `gdevelop` : commande
+`node dist/src/index.js` avec `vendor/libGD.js` + les extensions GDJS
+extraites de l'AppImage (`third-party/GDJS`, ignoré par git).
+
+Reproduire l'extraction (AppImage GDevelop 5.x) :
+
+```sh
+APPIMAGE=/chemin/GDevelop-5-*.AppImage ./scripts/setup-gdjs-root.sh
+```
+
+Après `npm run build`, quitter puis relancer opencode (config chargée au
+démarrage). Exemple de premier prompt : « Crée un projet GDevelop nommé
+"Test", décris-le, sauve-le dans /tmp/test-agent/game.json ».
+
 ## Variables d'environnement
 
 | Variable | Défaut | Rôle |
