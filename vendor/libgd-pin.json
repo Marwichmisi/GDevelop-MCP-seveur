@@ -1,0 +1,8 @@
+{
+  "branch": "master",
+  "commit": null,
+  "sha256": {
+    "libGDJs": "0dc7920526d191ac0b1ee896dce166a8b175896aa887c7f42315d5c4891a2219",
+    "libGDWasm": "e4f49a5a630949aa9bc31ba4601cdca7cd81dad9d4cf77cb54d85d11c5301c2a"
+  }
+}
