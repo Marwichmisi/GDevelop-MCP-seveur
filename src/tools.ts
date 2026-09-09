@@ -32,6 +32,13 @@ import {
   updateBehavior,
   updateInstance,
 } from './content.js';
+import {
+  appendSceneEvents,
+  eventsSchemas,
+  moveSceneEvent,
+  removeSceneEvent,
+  validateSceneEvents,
+} from './events.js';
 
 export interface ToolDefinition {
   name: string;
@@ -89,7 +96,7 @@ export function createProjectTools(deps: CommandDeps): ToolDefinition[] {
 }
 
 export function registerProjectTools(server: McpServer, deps: CommandDeps): void {
-  for (const tool of [...createProjectTools(deps), ...createContentTools(deps)]) {
+  for (const tool of [...createProjectTools(deps), ...createContentTools(deps), ...createEventTools(deps)]) {
     server.registerTool(tool.name, { description: tool.description, inputSchema: tool.inputSchema }, tool.handler);
   }
 }
@@ -105,6 +112,21 @@ function contentTool<K extends keyof typeof contentSchemas>(
     name,
     description,
     inputSchema: contentSchemas[schemaKey].shape,
+    handler: async (args) => text(command(deps, args)),
+  };
+}
+
+function eventTool<K extends keyof typeof eventsSchemas>(
+  name: string,
+  description: string,
+  schemaKey: K,
+  command: (deps: CommandDeps, args: unknown) => unknown,
+  deps: CommandDeps,
+): ToolDefinition {
+  return {
+    name,
+    description,
+    inputSchema: eventsSchemas[schemaKey].shape,
     handler: async (args) => text(command(deps, args)),
   };
 }
@@ -164,5 +186,39 @@ export function createContentTools(deps: CommandDeps): ToolDefinition[] {
       deps,
     ),
     contentTool('remove_resource', 'Unregister a resource (the file stays on disk).', 'removeResource', removeResource, deps),
+  ];
+}
+
+/** The 4 event tools: one thin wrapper per event command, same payloads as batch (#17). */
+export function createEventTools(deps: CommandDeps): ToolDefinition[] {
+  return [
+    eventTool(
+      'append_scene_events',
+      'Append a recursive native-event tree (Standard, Else, Repeat, While, ForEach, Group, Comment, Link, JsCode-marker) with L1+L2 validation.',
+      'appendSceneEvents',
+      appendSceneEvents,
+      deps,
+    ),
+    eventTool(
+      'move_scene_event',
+      'Move an event by {path}|{id} selector to a new position (same or different parent).',
+      'moveSceneEvent',
+      moveSceneEvent,
+      deps,
+    ),
+    eventTool(
+      'remove_scene_event',
+      'Remove an event by {path}|{id} selector.',
+      'removeSceneEvent',
+      removeSceneEvent,
+      deps,
+    ),
+    eventTool(
+      'validate_scene_events',
+      'Validate an event tree without mutation (L1+L2 + JsCode marker).',
+      'validateSceneEvents',
+      validateSceneEvents,
+      deps,
+    ),
   ];
 }

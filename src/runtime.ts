@@ -1,20 +1,29 @@
 import { createRequire } from 'node:module';
+import { randomUUID } from 'node:crypto';
 import { existsSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { McpError, validationFailed } from './errors.js';
+import { JSCODE_MARKER_COMMENT, hasJsCodeMarker } from './events.js';
 import {
   BLOCKING_DIAGNOSTIC_TYPES,
   shortBehaviorName,
+  type AppendEventsInput,
+  type AppendEventsResult,
   type AttachBehaviorInput,
   type CreateObjectInput,
   type EngineDiagnostic,
   type EnginePorts,
   type EngineProject,
+  type EventInstructionInput,
+  type EventNodeInput,
+  type EventSelector,
   type ImportResourceInput,
+  type MoveEventInput,
   type PlaceInstanceInput,
   type ProjectSummary,
   type RemoveBehaviorInput,
+  type RemoveEventInput,
   type UpdateBehaviorInput,
   type UpdateInstancePatch,
   type VariableTarget,
@@ -178,6 +187,85 @@ interface GdLayersContainer {
   getLayersCount(): number;
 }
 
+interface GdInstructionHandle {
+  setType(type: string): void;
+  setParametersCount(count: number): void;
+  setParameter(index: number, value: string): void;
+  setInverted(inverted: boolean): void;
+  setAwaited(awaited: boolean): void;
+  delete(): void;
+}
+
+interface GdInstructionsList {
+  insert(instr: GdInstructionHandle, pos: number): void;
+  size(): number;
+}
+
+interface GdBaseEvent {
+  getType(): string;
+  getAiGeneratedEventId(): string;
+  setAiGeneratedEventId(id: string): void;
+  setDisabled(disabled: boolean): void;
+  canHaveSubEvents(): boolean;
+  getSubEvents(): GdEventsList;
+}
+
+interface GdEventsList {
+  getEventsCount(): number;
+  getEventAt(index: number): GdBaseEvent;
+  insertNewEvent(project: GdProjectHandle, type: string, pos: number): GdBaseEvent;
+  removeEventAt(pos: number): void;
+  moveEventToAnotherEventsList(event: GdBaseEvent, newList: GdEventsList, newPos: number): void;
+}
+
+interface GdStandardEvent extends GdBaseEvent {
+  getConditions(): GdInstructionsList;
+  getActions(): GdInstructionsList;
+}
+
+interface GdRepeatEvent extends GdStandardEvent {
+  setRepeatExpressionPlainString(expr: string): void;
+  setLoopIndexVariableName(name: string): void;
+}
+
+interface GdWhileEvent extends GdStandardEvent {
+  getWhileConditions(): GdInstructionsList;
+  setLoopIndexVariableName(name: string): void;
+}
+
+interface GdForEachEvent extends GdStandardEvent {
+  setObjectToPick(object: string): void;
+  setLoopIndexVariableName(name: string): void;
+}
+
+interface GdForEachChildVariableEvent extends GdStandardEvent {
+  setIterableVariableName(name: string): void;
+  setKeyIteratorVariableName(name: string): void;
+  setValueIteratorVariableName(name: string): void;
+  setLoopIndexVariableName(name: string): void;
+}
+
+interface GdGroupEvent extends GdBaseEvent {
+  setName(name: string): void;
+  setSource(source: string): void;
+}
+
+interface GdCommentEvent extends GdBaseEvent {
+  setComment(comment: string): void;
+}
+
+interface GdLinkEvent extends GdBaseEvent {
+  setTarget(target: string): void;
+  setIncludeAllEvents(): void;
+  setIncludeEventsGroup(group: string): void;
+  setIncludeStartAndEnd(start: number, end: number): void;
+}
+
+interface GdJsCodeEvent extends GdBaseEvent {
+  setInlineCode(code: string): void;
+  setParameterObjects(objects: string): void;
+}
+
 interface GdLayoutHandle {
   getName(): string;
   setName(name: string): void;
@@ -185,7 +273,7 @@ interface GdLayoutHandle {
   getInitialInstances(): GdInstancesContainer;
   getVariables(): GdVariablesContainer;
   getLayers(): GdLayersContainer;
-  getEvents(): { getEventsCount(): number };
+  getEvents(): GdEventsList;
   updateBehaviorsSharedData(project: GdProjectHandle): void;
 }
 
@@ -242,6 +330,7 @@ export interface GdNamespace {
   };
   SerializerElement: new () => GdSerializerElement;
   Project: new () => GdProjectHandle;
+  Instruction: new () => GdInstructionHandle;
   JsPlatform: { get(): { addNewExtension(extension: { delete(): void }): void } };
   PlatformExtension: new () => unknown;
   MetadataProvider: {
@@ -249,7 +338,20 @@ export interface GdNamespace {
     isBadObjectMetadata(metadata: unknown): boolean;
     getBehaviorMetadata(platform: unknown, type: string): unknown;
     isBadBehaviorMetadata(metadata: unknown): boolean;
+    getActionMetadata(platform: unknown, type: string): { getParametersCount(): number };
+    getConditionMetadata(platform: unknown, type: string): { getParametersCount(): number };
+    isBadInstructionMetadata(metadata: unknown): boolean;
   };
+  asStandardEvent(event: GdBaseEvent): GdStandardEvent;
+  asElseEvent(event: GdBaseEvent): GdStandardEvent;
+  asRepeatEvent(event: GdBaseEvent): GdRepeatEvent;
+  asWhileEvent(event: GdBaseEvent): GdWhileEvent;
+  asForEachEvent(event: GdBaseEvent): GdForEachEvent;
+  asForEachChildVariableEvent(event: GdBaseEvent): GdForEachChildVariableEvent;
+  asGroupEvent(event: GdBaseEvent): GdGroupEvent;
+  asCommentEvent(event: GdBaseEvent): GdCommentEvent;
+  asLinkEvent(event: GdBaseEvent): GdLinkEvent;
+  asJsCodeEvent(event: GdBaseEvent): GdJsCodeEvent;
   asSpriteConfiguration(configuration: unknown): {
     getAnimations(): { setAdaptCollisionMaskAutomatically(value: boolean): void };
   };
@@ -478,6 +580,260 @@ const RESOURCE_CONSTRUCTORS = {
   model3d: 'Model3DResource',
   javascript: 'JavaScriptResource',
 } as const;
+
+// --- Native events (ticket #14) ---
+
+const EVENT_TYPE_STRINGS: Record<EventNodeInput['kind'], string> = {
+  standard: 'BuiltinCommonInstructions::Standard',
+  else: 'BuiltinCommonInstructions::Else',
+  repeat: 'BuiltinCommonInstructions::Repeat',
+  while: 'BuiltinCommonInstructions::While',
+  foreach: 'BuiltinCommonInstructions::ForEach',
+  foreachChildVariable: 'BuiltinCommonInstructions::ForEachChildVariable',
+  group: 'BuiltinCommonInstructions::Group',
+  comment: 'BuiltinCommonInstructions::Comment',
+  link: 'BuiltinCommonInstructions::Link',
+  jscode: 'BuiltinCommonInstructions::JsCode',
+};
+
+function checkEventInstruction(
+  gd: GdNamespace,
+  project: GdProjectHandle,
+  instr: EventInstructionInput,
+  role: 'condition' | 'action' | 'while-condition',
+): void {
+  const platform = project.getCurrentPlatform();
+  const metadata =
+    role === 'action'
+      ? gd.MetadataProvider.getActionMetadata(platform, instr.type)
+      : gd.MetadataProvider.getConditionMetadata(platform, instr.type);
+  if (gd.MetadataProvider.isBadInstructionMetadata(metadata)) {
+    throw validationFailed(`Unknown ${role} type "${instr.type}" (L1).`);
+  }
+  const expected = metadata.getParametersCount();
+  if (instr.parameters.length !== expected) {
+    throw validationFailed(
+      `Wrong arity for ${role} "${instr.type}": expected ${expected}, got ${instr.parameters.length} (L2).`,
+    );
+  }
+}
+
+function validateEventTree(gd: GdNamespace, project: GdProjectHandle, nodes: EventNodeInput[]): void {
+  const visit = (list: EventNodeInput[], where: string): void => {
+    list.forEach((node, index) => {
+      const at = `${where}[${index}] (${node.kind})`;
+      if (node.kind === 'jscode' && !hasJsCodeMarker(node.inlineCode)) {
+        throw validationFailed(
+          `${at}: JsCode event refused: free JsCode is not allowed; inline code must contain the marker "${JSCODE_MARKER_COMMENT}".`,
+        );
+      }
+      const conditions =
+        node.kind === 'standard' ||
+        node.kind === 'else' ||
+        node.kind === 'repeat' ||
+        node.kind === 'while' ||
+        node.kind === 'foreach' ||
+        node.kind === 'foreachChildVariable'
+          ? (node.conditions ?? [])
+          : [];
+      const actions =
+        node.kind === 'standard' ||
+        node.kind === 'else' ||
+        node.kind === 'repeat' ||
+        node.kind === 'while' ||
+        node.kind === 'foreach' ||
+        node.kind === 'foreachChildVariable'
+          ? (node.actions ?? [])
+          : [];
+      for (const instr of conditions) checkEventInstruction(gd, project, instr, 'condition');
+      for (const instr of actions) checkEventInstruction(gd, project, instr, 'action');
+      if (node.kind === 'while') {
+        for (const instr of node.whileConditions) checkEventInstruction(gd, project, instr, 'while-condition');
+      }
+      // Required-field checks mirror the fake (zod enforces shape, but direct
+      // engine calls must refuse too).
+      if (node.kind === 'foreach' && node.object.trim() === '') {
+        throw validationFailed(`${at}: object must not be empty.`);
+      }
+      if (node.kind === 'foreachChildVariable' && node.iterableVariable.trim() === '') {
+        throw validationFailed(`${at}: iterableVariable must not be empty.`);
+      }
+      if (node.kind === 'group' && node.name.trim() === '') {
+        throw validationFailed(`${at}: group name must not be empty.`);
+      }
+      if (node.kind === 'link' && node.target.trim() === '') {
+        throw validationFailed(`${at}: link target must not be empty.`);
+      }
+      if ('events' in node && node.events) visit(node.events, `${at}.events`);
+    });
+  };
+  visit(nodes, 'events');
+}
+
+function appendEventInstruction(gd: GdNamespace, list: GdInstructionsList, instr: EventInstructionInput): void {
+  const handle = new gd.Instruction();
+  try {
+    handle.setType(instr.type);
+    handle.setParametersCount(instr.parameters.length);
+    instr.parameters.forEach((value, i) => handle.setParameter(i, value));
+    if (instr.inverted === true) handle.setInverted(true);
+    if (instr.awaited === true) handle.setAwaited(true);
+    // Never `push_back` (it reorders object-creation instructions): explicit
+    // `insert` at `size()`.
+    list.insert(handle, list.size());
+  } finally {
+    handle.delete();
+  }
+}
+
+function configureEventNode(
+  gd: GdNamespace,
+  project: GdProjectHandle,
+  base: GdBaseEvent,
+  node: EventNodeInput,
+  newId: string,
+): void {
+  base.setAiGeneratedEventId(newId);
+  if ('disabled' in node && node.disabled !== undefined) base.setDisabled(node.disabled);
+  const fillStandard = (
+    standard: GdStandardEvent,
+    source: { conditions?: EventInstructionInput[] | undefined; actions?: EventInstructionInput[] | undefined },
+  ): void => {
+    for (const instr of source.conditions ?? []) appendEventInstruction(gd, standard.getConditions(), instr);
+    for (const instr of source.actions ?? []) appendEventInstruction(gd, standard.getActions(), instr);
+  };
+  switch (node.kind) {
+    case 'standard':
+      fillStandard(gd.asStandardEvent(base), node);
+      break;
+    case 'else':
+      fillStandard(gd.asElseEvent(base), node);
+      break;
+    case 'repeat': {
+      const repeat = gd.asRepeatEvent(base);
+      repeat.setRepeatExpressionPlainString(node.repeatExpression);
+      if (node.loopIndexVariable !== undefined) repeat.setLoopIndexVariableName(node.loopIndexVariable);
+      fillStandard(repeat, node);
+      break;
+    }
+    case 'while': {
+      const whileEvent = gd.asWhileEvent(base);
+      for (const instr of node.whileConditions) appendEventInstruction(gd, whileEvent.getWhileConditions(), instr);
+      fillStandard(whileEvent, node);
+      break;
+    }
+    case 'foreach': {
+      const forEach = gd.asForEachEvent(base);
+      forEach.setObjectToPick(node.object);
+      if (node.loopIndexVariable !== undefined) forEach.setLoopIndexVariableName(node.loopIndexVariable);
+      fillStandard(forEach, node);
+      break;
+    }
+    case 'foreachChildVariable': {
+      const forChild = gd.asForEachChildVariableEvent(base);
+      forChild.setIterableVariableName(node.iterableVariable);
+      if (node.keyIterator !== undefined) forChild.setKeyIteratorVariableName(node.keyIterator);
+      if (node.valueIterator !== undefined) forChild.setValueIteratorVariableName(node.valueIterator);
+      fillStandard(forChild, node);
+      break;
+    }
+    case 'group': {
+      const group = gd.asGroupEvent(base);
+      group.setName(node.name);
+      if (node.source !== undefined) group.setSource(node.source);
+      break;
+    }
+    case 'comment':
+      gd.asCommentEvent(base).setComment(node.comment);
+      break;
+    case 'link': {
+      const link = gd.asLinkEvent(base);
+      link.setTarget(node.target);
+      if (node.includeAll === false && node.eventsGroup !== undefined) {
+        link.setIncludeEventsGroup(node.eventsGroup);
+      } else {
+        link.setIncludeAllEvents();
+      }
+      if (node.includeStart !== undefined && node.includeEnd !== undefined) {
+        link.setIncludeStartAndEnd(node.includeStart, node.includeEnd);
+      }
+      break;
+    }
+    case 'jscode': {
+      const js = gd.asJsCodeEvent(base);
+      js.setInlineCode(node.inlineCode);
+      if (node.parameterObjects !== undefined) js.setParameterObjects(node.parameterObjects);
+      break;
+    }
+  }
+}
+
+function appendEventSubtree(
+  gd: GdNamespace,
+  project: GdProjectHandle,
+  parent: GdEventsList,
+  node: EventNodeInput,
+  collectedIds: string[],
+  parentPath: number[],
+  collectedPaths: number[][],
+): void {
+  const type = EVENT_TYPE_STRINGS[node.kind];
+  const base = parent.insertNewEvent(project, type, parent.getEventsCount());
+  const newId = randomUUID();
+  configureEventNode(gd, project, base, node, newId);
+  const index = parent.getEventsCount() - 1;
+  const path = [...parentPath, index];
+  collectedIds.push(newId);
+  collectedPaths.push(path);
+  if ('events' in node && node.events && node.events.length > 0) {
+    const sub = base.getSubEvents();
+    for (const child of node.events) appendEventSubtree(gd, project, sub, child, collectedIds, path, collectedPaths);
+  }
+}
+
+interface ResolvedLiveEvent {
+  parent: GdEventsList;
+  index: number;
+  event: GdBaseEvent;
+  path: number[];
+}
+
+function resolveLiveEventPath(root: GdEventsList, path: number[]): ResolvedLiveEvent {
+  let parent = root;
+  let event: GdBaseEvent | undefined;
+  const resolved: number[] = [];
+  for (let depth = 0; depth < path.length; depth++) {
+    const index = path[depth] as number;
+    if (!Number.isInteger(index) || index < 0 || index >= parent.getEventsCount()) {
+      throw validationFailed(`Unknown event path [${path.join(', ')}]: index ${index} out of range at depth ${depth}.`);
+    }
+    event = parent.getEventAt(index);
+    resolved.push(index);
+    if (depth < path.length - 1) parent = event.getSubEvents();
+  }
+  if (!event) throw validationFailed(`Unknown event path [${path.join(', ')}]: empty path.`);
+  return { parent, index: path[path.length - 1] as number, event, path: resolved };
+}
+
+function findLiveEventById(root: GdEventsList, id: string): ResolvedLiveEvent {
+  const visit = (list: GdEventsList, prefix: number[]): ResolvedLiveEvent | null => {
+    for (let i = 0; i < list.getEventsCount(); i++) {
+      const event = list.getEventAt(i);
+      if (event.getAiGeneratedEventId() === id) return { parent: list, index: i, event, path: [...prefix, i] };
+      const nested = visit(event.getSubEvents(), [...prefix, i]);
+      if (nested) return nested;
+    }
+    return null;
+  };
+  const found = visit(root, []);
+  if (!found) throw validationFailed(`Unknown event id "${id}".`);
+  return found;
+}
+
+function resolveLiveEvent(root: GdEventsList, selector: EventSelector): ResolvedLiveEvent {
+  if ('path' in selector) return resolveLiveEventPath(root, selector.path);
+  return findLiveEventById(root, selector.id);
+}
 
 export function createRealEngine(gd: GdNamespace): EnginePorts {
   return {
@@ -1046,6 +1402,78 @@ export function createRealEngine(gd: GdNamespace): EnginePorts {
       const resources = (project as GdProjectHandle).getResourcesManager();
       if (!resources.hasResource(name)) throw validationFailed(`Unknown resource "${name}".`);
       resources.removeResource(name);
+    },
+    appendSceneEvents(project: EngineProject, input: AppendEventsInput): AppendEventsResult {
+      const handle = project as GdProjectHandle;
+      const layout = requireLayout(handle, input.scene);
+      validateEventTree(gd, handle, input.events);
+      const root = layout.getEvents();
+      const at =
+        input.position === undefined ? root.getEventsCount() : clampPosition(input.position, root.getEventsCount());
+      // Insert the block one by one at `at + i` so `position` is the index of
+      // the first new event (never `push_back` semantics by accident).
+      const ids: string[] = [];
+      const paths: number[][] = [];
+      input.events.forEach((node, offset) => {
+        const type = EVENT_TYPE_STRINGS[node.kind];
+        const base = root.insertNewEvent(handle, type, at + offset);
+        const newId = randomUUID();
+        configureEventNode(gd, handle, base, node, newId);
+        ids.push(newId);
+        paths.push([at + offset]);
+        if ('events' in node && node.events && node.events.length > 0) {
+          const sub = base.getSubEvents();
+          for (const child of node.events) appendEventSubtree(gd, handle, sub, child, ids, [at + offset], paths);
+        }
+      });
+      return { appended: input.events.length, ids, paths, dryRun: false };
+    },
+    moveSceneEvent(project: EngineProject, input: MoveEventInput): { moved: boolean; dryRun: boolean } {
+      const handle = project as GdProjectHandle;
+      const layout = requireLayout(handle, input.scene);
+      const root = layout.getEvents();
+      const source = resolveLiveEvent(root, input.from);
+      const destParent: GdEventsList = input.toParent
+        ? resolveLiveEvent(layout.getEvents(), input.toParent).event.getSubEvents()
+        : source.parent;
+      // Refuse to move a parent into its own subtree.
+      if (input.toParent) {
+        const dest = resolveLiveEvent(layout.getEvents(), input.toParent);
+        if (!dest.event.canHaveSubEvents()) {
+          throw validationFailed('Destination parent cannot hold sub-events (comment, link and JsCode are leaves).');
+        }
+        if (
+          dest.path.length > source.path.length &&
+          dest.path.slice(0, source.path.length).every((value, i) => value === source.path[i])
+        ) {
+          throw validationFailed('Cannot move an event into its own subtree.');
+        }
+      }
+      const at = clampPosition(input.toPosition, destParent.getEventsCount());
+      source.parent.moveEventToAnotherEventsList(source.event, destParent, at);
+      return { moved: true, dryRun: false };
+    },
+    removeSceneEvent(project: EngineProject, input: RemoveEventInput): { removed: boolean; dryRun: boolean } {
+      const handle = project as GdProjectHandle;
+      const layout = requireLayout(handle, input.scene);
+      const resolved = resolveLiveEvent(layout.getEvents(), input.target);
+      resolved.parent.removeEventAt(resolved.index);
+      return { removed: true, dryRun: false };
+    },
+    validateSceneEvents(
+      project: EngineProject,
+      scene: string,
+      events: EventNodeInput[],
+    ): { valid: boolean; errors: string[] } {
+      const handle = project as GdProjectHandle;
+      requireLayout(handle, scene);
+      try {
+        validateEventTree(gd, handle, events);
+        return { valid: true, errors: [] };
+      } catch (error) {
+        if (error instanceof McpError) return { valid: false, errors: [error.message] };
+        throw error;
+      }
     },
     setProjectName(project: EngineProject, name: string): void {
       (project as GdProjectHandle).setName(name);

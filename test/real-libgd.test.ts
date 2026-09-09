@@ -165,4 +165,111 @@ describe('real libGD.js runtime', { skip: !LIBGD_PATH }, () => {
       { name: 'hero', kind: 'image', file: 'hero.png' },
     ]);
   });
+
+  it('appends a Gameplay event tree natively, verified at reload with stable ids', async () => {
+    const { loadGdRuntime } = await import('../src/runtime.js');
+    const { ProjectStore } = await import('../src/sessions.js');
+    const { createProject, describeProject, saveProject, openProject } = await import('../src/commands.js');
+    const content = await import('../src/content.js');
+    const events = await import('../src/events.js');
+    const runtime = await loadGdRuntime({ libgdPath: LIBGD_PATH });
+    const deps = { store: new ProjectStore(runtime.engine), engine: runtime.engine };
+
+    const { sessionId } = createProject(deps, { name: 'Real events' });
+    content.createScene(deps, { sessionId, name: 'Game' });
+    const appended = events.appendSceneEvents(deps, {
+      sessionId,
+      scene: 'Game',
+      events: [
+        {
+          kind: 'group',
+          name: 'Gameplay',
+          events: [
+            {
+              kind: 'standard',
+              conditions: [{ type: 'VarScene', parameters: ['Score', '=', '0'] }],
+              actions: [{ type: 'ModVarScene', parameters: ['Score', '+', '1'] }],
+              events: [{ kind: 'else', actions: [{ type: 'ModVarScene', parameters: ['Score', '+', '1'] }] }],
+            },
+            { kind: 'repeat', repeatExpression: '3', actions: [{ type: 'ModVarScene', parameters: ['Score', '+', '1'] }] },
+            {
+              kind: 'while',
+              whileConditions: [{ type: 'VarScene', parameters: ['Score', '=', '0'] }],
+              actions: [{ type: 'ModVarScene', parameters: ['Score', '+', '1'] }],
+            },
+            { kind: 'foreach', object: 'Hero', actions: [{ type: 'ModVarScene', parameters: ['Score', '+', '1'] }] },
+            { kind: 'link', target: 'External' },
+            { kind: 'jscode', inlineCode: '/* gdevelop-mcp:scene-script */ console.log(1);' },
+          ],
+        },
+      ],
+    });
+    assert.equal(appended.appended, 1);
+    assert.ok(appended.ids.length >= 8);
+    let scene = describeProject(deps, { sessionId }).content.scenes[0];
+    assert.equal(scene?.events.length, 1);
+    assert.equal(scene?.events[0]?.kind, 'group');
+    const groupId = scene?.events[0]?.id;
+    assert.match(groupId ?? '', /^[0-9a-f-]{36}$/);
+    const standardId = scene?.events[0]?.events[0]?.id;
+    assert.match(standardId ?? '', /^[0-9a-f-]{36}$/);
+
+    // move by id, remove by path, validate without mutation.
+    events.moveSceneEvent(deps, { sessionId, scene: 'Game', from: { id: standardId as string }, toPosition: 1 });
+    scene = describeProject(deps, { sessionId }).content.scenes[0];
+    assert.equal(scene?.events[0]?.events[1]?.id, standardId);
+    const validated = events.validateSceneEvents(deps, {
+      sessionId,
+      scene: 'Game',
+      events: [{ kind: 'comment', comment: 'ok' }],
+    });
+    assert.equal(validated.valid, true);
+    events.removeSceneEvent(deps, { sessionId, scene: 'Game', target: { path: [0, 0] } });
+    scene = describeProject(deps, { sessionId }).content.scenes[0];
+    assert.equal(scene?.events[0]?.events.length, 5);
+
+    // Native round-trip: save → reopen keeps the tree and the stamped ids.
+    const dir = mkdtempSync(join(tmpdir(), 'gd-real-events-'));
+    const file = join(dir, 'game.json');
+    saveProject(deps, { sessionId, path: file });
+    const reopened = new ProjectStore(runtime.engine);
+    const opened = openProject({ store: reopened, engine: runtime.engine }, { path: file });
+    const again = describeProject({ store: reopened, engine: runtime.engine }, { sessionId: opened.sessionId });
+    assert.equal(again.content.scenes[0]?.events.length, 1);
+    assert.equal(again.content.scenes[0]?.events[0]?.id, groupId);
+  });
+
+  it('refuses unknown types (L1), wrong arity (L2) and free JsCode on the real engine', async () => {
+    const { loadGdRuntime } = await import('../src/runtime.js');
+    const { ProjectStore } = await import('../src/sessions.js');
+    const { createProject, describeProject } = await import('../src/commands.js');
+    const content = await import('../src/content.js');
+    const events = await import('../src/events.js');
+    const runtime = await loadGdRuntime({ libgdPath: LIBGD_PATH });
+    const deps = { store: new ProjectStore(runtime.engine), engine: runtime.engine };
+
+    const { sessionId } = createProject(deps, { name: 'Real refusals' });
+    content.createScene(deps, { sessionId, name: 'G' });
+    const refuses = (action: () => unknown, pattern: RegExp): void => {
+      assert.throws(action, (error: unknown) => error instanceof McpError && pattern.test(error.message));
+    };
+    refuses(
+      () => events.appendSceneEvents(deps, { sessionId, scene: 'G', events: [{ kind: 'standard', actions: [{ type: 'NopeNope', parameters: [] }] }] }),
+      /Unknown action type.*L1/,
+    );
+    refuses(
+      () =>
+        events.appendSceneEvents(deps, {
+          sessionId,
+          scene: 'G',
+          events: [{ kind: 'standard', actions: [{ type: 'ModVarScene', parameters: ['only-one'] }] }],
+        }),
+      /Wrong arity.*L2/,
+    );
+    refuses(
+      () => events.appendSceneEvents(deps, { sessionId, scene: 'G', events: [{ kind: 'jscode', inlineCode: 'alert(1)' }] }),
+      /marker/,
+    );
+    assert.equal(describeProject(deps, { sessionId }).eventCount, 0);
+  });
 });

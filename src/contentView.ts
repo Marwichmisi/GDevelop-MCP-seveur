@@ -52,6 +52,35 @@ export interface SerializedGroup {
   objects?: { name?: unknown }[] | undefined;
 }
 
+export interface SerializedInstruction {
+  type?: unknown;
+  parameters?: unknown;
+  inverted?: unknown;
+  awaited?: unknown;
+}
+
+export interface SerializedEvent {
+  type?: unknown;
+  aiGeneratedEventId?: unknown;
+  conditions?: SerializedInstruction[] | undefined;
+  actions?: SerializedInstruction[] | undefined;
+  events?: SerializedEvent[] | undefined;
+  disabled?: unknown;
+  repeatExpression?: unknown;
+  loopIndexVariable?: unknown;
+  whileConditions?: SerializedInstruction[] | undefined;
+  object?: unknown;
+  iterableVariableName?: unknown;
+  keyIteratorVariableName?: unknown;
+  valueIteratorVariableName?: unknown;
+  name?: unknown;
+  source?: unknown;
+  comment?: unknown;
+  target?: unknown;
+  inlineCode?: unknown;
+  parameterObjects?: unknown;
+}
+
 export interface SerializedLayout {
   name?: unknown;
   layers?: { name?: unknown }[] | undefined;
@@ -59,6 +88,7 @@ export interface SerializedLayout {
   instances?: SerializedInstance[] | undefined;
   variables?: SerializedVariable[] | undefined;
   objectsGroups?: SerializedGroup[] | undefined;
+  events?: SerializedEvent[] | undefined;
 }
 
 export interface SerializedProject {
@@ -104,6 +134,35 @@ export interface GroupView {
   objects: string[];
 }
 
+export interface InstructionView {
+  type: string;
+  parameters: string[];
+  inverted: boolean;
+  awaited: boolean;
+}
+
+export interface EventView {
+  id: string;
+  kind: string;
+  disabled: boolean;
+  conditions: InstructionView[];
+  actions: InstructionView[];
+  events: EventView[];
+  repeatExpression?: string;
+  loopIndexVariable?: string;
+  whileConditions?: InstructionView[];
+  object?: string;
+  iterableVariable?: string;
+  keyIterator?: string;
+  valueIterator?: string;
+  name?: string;
+  source?: string;
+  comment?: string;
+  target?: string;
+  inlineCode?: string;
+  parameterObjects?: string;
+}
+
 export interface SceneView {
   name: string;
   layers: string[];
@@ -111,6 +170,7 @@ export interface SceneView {
   instances: InstanceView[];
   variables: Record<string, JsonValue>;
   groups: GroupView[];
+  events: EventView[];
 }
 
 export interface ResourceView {
@@ -226,6 +286,65 @@ function readGroup(node: SerializedGroup): GroupView {
   };
 }
 
+const EVENT_KINDS: Record<string, string> = {
+  'BuiltinCommonInstructions::Standard': 'standard',
+  'BuiltinCommonInstructions::Else': 'else',
+  'BuiltinCommonInstructions::Repeat': 'repeat',
+  'BuiltinCommonInstructions::While': 'while',
+  'BuiltinCommonInstructions::ForEach': 'foreach',
+  'BuiltinCommonInstructions::ForEachChildVariable': 'foreachChildVariable',
+  'BuiltinCommonInstructions::Group': 'group',
+  'BuiltinCommonInstructions::Comment': 'comment',
+  'BuiltinCommonInstructions::Link': 'link',
+  'BuiltinCommonInstructions::JsCode': 'jscode',
+};
+
+function readInstructionType(raw: unknown): string {
+  if (typeof raw === 'string') return raw;
+  if (typeof raw === 'object' && raw !== null && 'value' in raw) {
+    const value = (raw as { value?: unknown }).value;
+    if (typeof value === 'string') return value;
+  }
+  return '';
+}
+
+function readInstruction(node: SerializedInstruction): InstructionView {
+  const parameters = Array.isArray(node.parameters) ? node.parameters.map((p) => String(p)) : [];
+  return {
+    type: readInstructionType(node.type),
+    parameters,
+    inverted: node.inverted === true,
+    awaited: node.awaited === true,
+  };
+}
+
+function readEvent(node: SerializedEvent): EventView {
+  const rawType = asString(node.type);
+  const kind = EVENT_KINDS[rawType] ?? rawType;
+  const view: EventView = {
+    id: asString(node.aiGeneratedEventId),
+    kind,
+    disabled: node.disabled === true,
+    conditions: asArray(node.conditions).map(readInstruction),
+    actions: asArray(node.actions).map(readInstruction),
+    events: asArray(node.events).map(readEvent),
+  };
+  if (node.repeatExpression !== undefined) view.repeatExpression = String(node.repeatExpression);
+  if (node.loopIndexVariable !== undefined) view.loopIndexVariable = asString(node.loopIndexVariable);
+  if (node.whileConditions !== undefined) view.whileConditions = asArray(node.whileConditions).map(readInstruction);
+  if (node.object !== undefined) view.object = asString(node.object);
+  if (node.iterableVariableName !== undefined) view.iterableVariable = asString(node.iterableVariableName);
+  if (node.keyIteratorVariableName !== undefined) view.keyIterator = asString(node.keyIteratorVariableName);
+  if (node.valueIteratorVariableName !== undefined) view.valueIterator = asString(node.valueIteratorVariableName);
+  if (node.name !== undefined) view.name = asString(node.name);
+  if (node.source !== undefined) view.source = asString(node.source);
+  if (node.comment !== undefined) view.comment = String(node.comment);
+  if (node.target !== undefined) view.target = asString(node.target);
+  if (node.inlineCode !== undefined) view.inlineCode = String(node.inlineCode);
+  if (node.parameterObjects !== undefined) view.parameterObjects = asString(node.parameterObjects);
+  return view;
+}
+
 function readScene(node: SerializedLayout): SceneView {
   return {
     name: asString(node.name),
@@ -234,6 +353,7 @@ function readScene(node: SerializedLayout): SceneView {
     instances: asArray(node.instances).map(readInstance),
     variables: readVariables(node.variables),
     groups: asArray(node.objectsGroups).map(readGroup),
+    events: asArray(node.events).map(readEvent),
   };
 }
 

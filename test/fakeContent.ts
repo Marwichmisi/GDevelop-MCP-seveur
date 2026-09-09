@@ -1,18 +1,53 @@
 import { randomUUID } from 'node:crypto';
 import { validationFailed } from '../src/errors.js';
+import { JSCODE_MARKER_COMMENT, hasJsCodeMarker } from '../src/events.js';
 import type {
+  AppendEventsInput,
+  AppendEventsResult,
   AttachBehaviorInput,
   CreateObjectInput,
   EngineProject,
+  EventInstructionInput,
+  EventNodeInput,
+  EventSelector,
   ImportResourceInput,
+  MoveEventInput,
   PlaceInstanceInput,
   RemoveBehaviorInput,
+  RemoveEventInput,
   UpdateBehaviorInput,
   UpdateInstancePatch,
   VariableTarget,
 } from '../src/engine.js';
 import { SUPPORTED_RESOURCE_KINDS, shortBehaviorName } from '../src/engine.js';
 import { readContentView, toVariableNode, type JsonValue, type SerializedVariable } from '../src/contentView.js';
+
+export interface FakeEventState {
+  id: string;
+  kind: string;
+  conditions: { type: string; parameters: string[]; inverted?: boolean; awaited?: boolean }[];
+  actions: { type: string; parameters: string[]; inverted?: boolean; awaited?: boolean }[];
+  events: FakeEventState[];
+  // Type-specific fields (mirrors the serialized engine shape).
+  repeatExpression?: string;
+  loopIndexVariable?: string;
+  whileConditions?: { type: string; parameters: string[]; inverted?: boolean; awaited?: boolean }[];
+  object?: string;
+  iterableVariable?: string;
+  keyIterator?: string;
+  valueIterator?: string;
+  name?: string;
+  source?: string;
+  comment?: string;
+  target?: string;
+  includeAll?: boolean;
+  eventsGroup?: string;
+  includeStart?: number;
+  includeEnd?: number;
+  inlineCode?: string;
+  parameterObjects?: string;
+  disabled?: boolean;
+}
 
 export interface FakeLayoutState {
   name: string;
@@ -21,6 +56,7 @@ export interface FakeLayoutState {
   instances: FakeInstanceState[];
   variables: SerializedVariable[];
   objectsGroups: FakeGroupState[];
+  events: FakeEventState[];
 }
 
 export interface FakeObjectState {
@@ -155,7 +191,7 @@ function setVariableNode(variables: SerializedVariable[], name: string, value: J
 /** All content mutations on a fake state. Each validates before mutating. */
 export function createScene(state: FakeContentState, name: string): void {
   if (state.layouts.some((layout) => layout.name === name)) throw validationFailed(`Scene "${name}" already exists.`);
-  state.layouts.push({ name, layers: [{ name: '' }], objects: [], instances: [], variables: [], objectsGroups: [] });
+  state.layouts.push({ name, layers: [{ name: '' }], objects: [], instances: [], variables: [], objectsGroups: [], events: [] });
 }
 
 export function renameScene(state: FakeContentState, oldName: string, newName: string): void {
@@ -518,6 +554,257 @@ export function removeResource(state: FakeContentState, name: string): void {
   state.resources.splice(index, 1);
 }
 
+// --- Events (ticket #14, fake side of the engine seam) ---
+
+/** Minimal instruction catalog for the fake: mirrors the real arity for the
+ *  two instructions the suites use (ModVarScene action / VarScene condition).
+ *  Anything else is an L1 refusal, like MetadataProvider would report. */
+const FAKE_ACTION_ARITY: Record<string, number> = { ModVarScene: 3 };
+const FAKE_CONDITION_ARITY: Record<string, number> = { VarScene: 3 };
+
+function checkFakeInstructions(
+  list: EventInstructionInput[] | undefined,
+  role: 'condition' | 'action' | 'while-condition',
+  errors: string[],
+): void {
+  for (const instr of list ?? []) {
+    const catalog = role === 'action' ? FAKE_ACTION_ARITY : FAKE_CONDITION_ARITY;
+    const expected = catalog[instr.type];
+    if (expected === undefined) {
+      errors.push(`Unknown ${role} type "${instr.type}" (L1).`);
+      continue;
+    }
+    if (instr.parameters.length !== expected) {
+      errors.push(
+        `Wrong arity for ${role} "${instr.type}": expected ${expected}, got ${instr.parameters.length} (L2).`,
+      );
+    }
+  }
+}
+
+function collectEventErrors(nodes: EventNodeInput[], errors: string[], where = 'events'): void {
+  nodes.forEach((node, index) => {
+    const at = `${where}[${index}] (${node.kind})`;
+    switch (node.kind) {
+      case 'standard':
+      case 'else':
+      case 'repeat':
+      case 'while':
+      case 'foreach':
+      case 'foreachChildVariable':
+        checkFakeInstructions(node.conditions, 'condition', errors);
+        checkFakeInstructions(node.actions, 'action', errors);
+        break;
+      default:
+        break;
+    }
+    switch (node.kind) {
+      case 'repeat':
+        if (typeof node.repeatExpression !== 'string') errors.push(`${at}: repeatExpression must be a string.`);
+        break;
+      case 'while':
+        checkFakeInstructions(node.whileConditions, 'while-condition', errors);
+        break;
+      case 'foreach':
+        if (node.object.trim() === '') errors.push(`${at}: object must not be empty.`);
+        break;
+      case 'foreachChildVariable':
+        if (node.iterableVariable.trim() === '') errors.push(`${at}: iterableVariable must not be empty.`);
+        break;
+      case 'group':
+        if (node.name.trim() === '') errors.push(`${at}: group name must not be empty.`);
+        break;
+      case 'comment':
+        if (typeof node.comment !== 'string') errors.push(`${at}: comment must be a string.`);
+        break;
+      case 'link':
+        if (node.target.trim() === '') errors.push(`${at}: link target must not be empty.`);
+        break;
+      case 'jscode':
+        if (!hasJsCodeMarker(node.inlineCode)) {
+          errors.push(`${at}: JsCode without the marker "${JSCODE_MARKER_COMMENT}" is refused.`);
+        }
+        break;
+    }
+    if ('events' in node && node.events) collectEventErrors(node.events, errors, `${at}.events`);
+  });
+}
+
+function throwOnEventErrors(nodes: EventNodeInput[]): void {
+  const errors: string[] = [];
+  collectEventErrors(nodes, errors);
+  if (errors.length > 0) throw validationFailed(`Invalid events: ${errors.join('; ')}`);
+}
+
+function toFakeInstruction(instr: EventInstructionInput): FakeEventState['conditions'][number] {
+  return {
+    type: instr.type,
+    parameters: [...instr.parameters],
+    ...(instr.inverted !== undefined ? { inverted: instr.inverted } : {}),
+    ...(instr.awaited !== undefined ? { awaited: instr.awaited } : {}),
+  };
+}
+
+function buildFakeEvent(node: EventNodeInput): FakeEventState {
+  const base: FakeEventState = {
+    id: randomUUID(),
+    kind: node.kind,
+    conditions: [],
+    actions: [],
+    events: [],
+  };
+  if (node.kind === 'standard' || node.kind === 'else' || node.kind === 'repeat' || node.kind === 'while' || node.kind === 'foreach' || node.kind === 'foreachChildVariable') {
+    base.conditions = (node.conditions ?? []).map(toFakeInstruction);
+    base.actions = (node.actions ?? []).map(toFakeInstruction);
+    base.events = (node.events ?? []).map(buildFakeEvent);
+    if (node.disabled !== undefined) base.disabled = node.disabled;
+  }
+  switch (node.kind) {
+    case 'repeat':
+      base.repeatExpression = node.repeatExpression;
+      if (node.loopIndexVariable !== undefined) base.loopIndexVariable = node.loopIndexVariable;
+      break;
+    case 'while':
+      base.whileConditions = node.whileConditions.map(toFakeInstruction);
+      break;
+    case 'foreach':
+      base.object = node.object;
+      if (node.loopIndexVariable !== undefined) base.loopIndexVariable = node.loopIndexVariable;
+      break;
+    case 'foreachChildVariable':
+      base.iterableVariable = node.iterableVariable;
+      if (node.keyIterator !== undefined) base.keyIterator = node.keyIterator;
+      if (node.valueIterator !== undefined) base.valueIterator = node.valueIterator;
+      break;
+    case 'group':
+      base.name = node.name;
+      if (node.source !== undefined) base.source = node.source;
+      base.events = (node.events ?? []).map(buildFakeEvent);
+      if (node.disabled !== undefined) base.disabled = node.disabled;
+      break;
+    case 'comment':
+      base.comment = node.comment;
+      break;
+    case 'link':
+      base.target = node.target;
+      if (node.includeAll !== undefined) base.includeAll = node.includeAll;
+      if (node.eventsGroup !== undefined) base.eventsGroup = node.eventsGroup;
+      if (node.includeStart !== undefined) base.includeStart = node.includeStart;
+      if (node.includeEnd !== undefined) base.includeEnd = node.includeEnd;
+      break;
+    case 'jscode':
+      base.inlineCode = node.inlineCode;
+      if (node.parameterObjects !== undefined) base.parameterObjects = node.parameterObjects;
+      break;
+  }
+  return base;
+}
+
+interface ResolvedEvent {
+  parent: FakeEventState[];
+  index: number;
+  event: FakeEventState;
+  path: number[];
+}
+
+function resolveEventPath(root: FakeEventState[], path: number[]): ResolvedEvent {
+  let parent: FakeEventState[] = root;
+  let event: FakeEventState | undefined;
+  const resolved: number[] = [];
+  for (let depth = 0; depth < path.length; depth++) {
+    const index = path[depth] as number;
+    if (!Number.isInteger(index) || index < 0 || index >= parent.length) {
+      throw validationFailed(`Unknown event path [${path.join(', ')}]: index ${index} out of range at depth ${depth}.`);
+    }
+    event = parent[index] as FakeEventState;
+    resolved.push(index);
+    if (depth < path.length - 1) parent = event.events;
+  }
+  if (!event) throw validationFailed(`Unknown event path [${path.join(', ')}]: empty path.`);
+  return { parent, index: path[path.length - 1] as number, event, path: resolved };
+}
+
+function findEventById(root: FakeEventState[], id: string): ResolvedEvent {
+  const visit = (list: FakeEventState[], prefix: number[]): ResolvedEvent | null => {
+    for (let i = 0; i < list.length; i++) {
+      const event = list[i] as FakeEventState;
+      if (event.id === id) return { parent: list, index: i, event, path: [...prefix, i] };
+      const nested = visit(event.events, [...prefix, i]);
+      if (nested) return nested;
+    }
+    return null;
+  };
+  const found = visit(root, []);
+  if (!found) throw validationFailed(`Unknown event id "${id}".`);
+  return found;
+}
+
+function resolveEventSelector(root: FakeEventState[], selector: EventSelector): ResolvedEvent {
+  if ('path' in selector) return resolveEventPath(root, selector.path);
+  return findEventById(root, selector.id);
+}
+
+export function appendSceneEvents(state: FakeContentState, input: AppendEventsInput): AppendEventsResult {
+  const layout = findLayout(state, input.scene);
+  throwOnEventErrors(input.events);
+  const built = input.events.map(buildFakeEvent);
+  const at = input.position === undefined ? layout.events.length : clampPosition(input.position, layout.events.length);
+  layout.events.splice(at, 0, ...built);
+  // Report every stamped id (root + nested, DFS order) so agents can address
+  // sub-events by stable id without a second describe.
+  const ids: string[] = [];
+  const paths: number[][] = [];
+  const collect = (event: FakeEventState, path: number[]): void => {
+    ids.push(event.id);
+    paths.push(path);
+    event.events.forEach((child, i) => collect(child, [...path, i]));
+  };
+  built.forEach((event, offset) => collect(event, [at + offset]));
+  return { appended: built.length, ids, paths, dryRun: false };
+}
+
+export function moveSceneEvent(state: FakeContentState, input: MoveEventInput): { moved: boolean; dryRun: boolean } {
+  const layout = findLayout(state, input.scene);
+  const source = resolveEventSelector(layout.events, input.from);
+  const destParentList: FakeEventState[] = input.toParent
+    ? resolveEventSelector(layout.events, input.toParent).event.events
+    : source.parent;
+  // Refuse to move a parent into its own subtree (would orphan the tree).
+  if (input.toParent) {
+    const dest = resolveEventSelector(layout.events, input.toParent);
+    if (dest.event.kind === 'comment' || dest.event.kind === 'link' || dest.event.kind === 'jscode') {
+      throw validationFailed('Destination parent cannot hold sub-events (comment, link and JsCode are leaves).');
+    }
+    if (dest.path.length > source.path.length && dest.path.slice(0, source.path.length).every((v, i) => v === source.path[i])) {
+      throw validationFailed('Cannot move an event into its own subtree.');
+    }
+  }
+  const [moved] = source.parent.splice(source.index, 1) as [FakeEventState];
+  const at = clampPosition(input.toPosition, destParentList.length);
+  // When moving inside the same list, the splice above already shifted indices;
+  // `at` is the final position in the shortened list (clamped).
+  destParentList.splice(at, 0, moved as FakeEventState);
+  return { moved: true, dryRun: false };
+}
+
+export function removeSceneEvent(state: FakeContentState, input: RemoveEventInput): { removed: boolean; dryRun: boolean } {
+  const layout = findLayout(state, input.scene);
+  const resolved = resolveEventSelector(layout.events, input.target);
+  resolved.parent.splice(resolved.index, 1);
+  return { removed: true, dryRun: false };
+}
+
+export function validateSceneEvents(
+  state: FakeContentState,
+  scene: string,
+  events: EventNodeInput[],
+): { valid: boolean; errors: string[] } {
+  findLayout(state, scene);
+  const errors: string[] = [];
+  collectEventErrors(events, errors);
+  return { valid: errors.length === 0, errors };
+}
+
 function toSerializedObject(object: FakeObjectState): {
   name: string;
   type: string;
@@ -532,9 +819,52 @@ function toSerializedObject(object: FakeObjectState): {
   };
 }
 
+function toEventView(event: FakeEventState): ReturnType<typeof readContentView>['scenes'][number]['events'][number] {
+  return {
+    id: event.id,
+    kind: event.kind,
+    disabled: event.disabled === true,
+    conditions: event.conditions.map((c) => ({
+      type: c.type,
+      parameters: [...c.parameters],
+      inverted: c.inverted === true,
+      awaited: c.awaited === true,
+    })),
+    actions: event.actions.map((a) => ({
+      type: a.type,
+      parameters: [...a.parameters],
+      inverted: a.inverted === true,
+      awaited: a.awaited === true,
+    })),
+    events: event.events.map(toEventView),
+    ...(event.repeatExpression !== undefined ? { repeatExpression: event.repeatExpression } : {}),
+    ...(event.loopIndexVariable !== undefined ? { loopIndexVariable: event.loopIndexVariable } : {}),
+    ...(event.whileConditions !== undefined
+      ? {
+          whileConditions: event.whileConditions.map((c) => ({
+            type: c.type,
+            parameters: [...c.parameters],
+            inverted: c.inverted === true,
+            awaited: c.awaited === true,
+          })),
+        }
+      : {}),
+    ...(event.object !== undefined ? { object: event.object } : {}),
+    ...(event.iterableVariable !== undefined ? { iterableVariable: event.iterableVariable } : {}),
+    ...(event.keyIterator !== undefined ? { keyIterator: event.keyIterator } : {}),
+    ...(event.valueIterator !== undefined ? { valueIterator: event.valueIterator } : {}),
+    ...(event.name !== undefined ? { name: event.name } : {}),
+    ...(event.source !== undefined ? { source: event.source } : {}),
+    ...(event.comment !== undefined ? { comment: event.comment } : {}),
+    ...(event.target !== undefined ? { target: event.target } : {}),
+    ...(event.inlineCode !== undefined ? { inlineCode: event.inlineCode } : {}),
+    ...(event.parameterObjects !== undefined ? { parameterObjects: event.parameterObjects } : {}),
+  };
+}
+
 /** Fake state already mirrors the serialized shape the reader expects. */
 export function describeContentState(state: FakeContentState): ReturnType<typeof readContentView> {
-  return readContentView({
+  const view = readContentView({
     layouts: state.layouts.map((layout) => ({
       name: layout.name,
       layers: layout.layers,
@@ -554,6 +884,11 @@ export function describeContentState(state: FakeContentState): ReturnType<typeof
     })),
     resources: state.resources,
   });
+  state.layouts.forEach((layout, i) => {
+    const scene = view.scenes[i];
+    if (scene) scene.events = (layout.events ?? []).map(toEventView);
+  });
+  return view;
 }
 
 export type { EngineProject };

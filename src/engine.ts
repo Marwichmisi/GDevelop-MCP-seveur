@@ -141,6 +141,137 @@ export interface ImportResourceInput {
   file: string;
 }
 
+/** Single condition/action instruction: positional string parameters, faithful to the engine. */
+export interface EventInstructionInput {
+  type: string;
+  parameters: string[];
+  inverted?: boolean | undefined;
+  awaited?: boolean | undefined;
+}
+
+export type EventKind =
+  | 'standard'
+  | 'else'
+  | 'repeat'
+  | 'while'
+  | 'foreach'
+  | 'foreachChildVariable'
+  | 'group'
+  | 'comment'
+  | 'link'
+  | 'jscode';
+
+interface EventNodeBase {
+  kind: EventKind;
+  conditions?: EventInstructionInput[] | undefined;
+  actions?: EventInstructionInput[] | undefined;
+  events?: EventNodeInput[] | undefined;
+  disabled?: boolean | undefined;
+}
+
+export interface StandardEventInput extends EventNodeBase {
+  kind: 'standard';
+}
+
+export interface ElseEventInput extends EventNodeBase {
+  kind: 'else';
+}
+
+export interface RepeatEventInput extends EventNodeBase {
+  kind: 'repeat';
+  repeatExpression: string;
+  loopIndexVariable?: string | undefined;
+}
+
+export interface WhileEventInput extends EventNodeBase {
+  kind: 'while';
+  whileConditions: EventInstructionInput[];
+}
+
+export interface ForEachEventInput extends EventNodeBase {
+  kind: 'foreach';
+  object: string;
+  loopIndexVariable?: string | undefined;
+}
+
+export interface ForEachChildVariableEventInput extends EventNodeBase {
+  kind: 'foreachChildVariable';
+  iterableVariable: string;
+  keyIterator?: string | undefined;
+  valueIterator?: string | undefined;
+}
+
+export interface GroupEventInput {
+  kind: 'group';
+  name: string;
+  source?: string | undefined;
+  events?: EventNodeInput[] | undefined;
+  disabled?: boolean | undefined;
+}
+
+export interface CommentEventInput {
+  kind: 'comment';
+  comment: string;
+}
+
+export interface LinkEventInput {
+  kind: 'link';
+  target: string;
+  includeAll?: boolean | undefined;
+  eventsGroup?: string | undefined;
+  includeStart?: number | undefined;
+  includeEnd?: number | undefined;
+}
+
+export interface JsCodeEventInput {
+  kind: 'jscode';
+  inlineCode: string;
+  parameterObjects?: string | undefined;
+}
+
+export type EventNodeInput =
+  | StandardEventInput
+  | ElseEventInput
+  | RepeatEventInput
+  | WhileEventInput
+  | ForEachEventInput
+  | ForEachChildVariableEventInput
+  | GroupEventInput
+  | CommentEventInput
+  | LinkEventInput
+  | JsCodeEventInput;
+
+/** Event selector: immediate index path or stable stamped id (resolved by traversal). */
+export type EventSelector = { path: number[] } | { id: string };
+
+export interface AppendEventsInput {
+  scene: string;
+  events: EventNodeInput[];
+  position?: number | undefined;
+  dryRun?: boolean | undefined;
+}
+
+export interface AppendEventsResult {
+  appended: number;
+  ids: string[];
+  paths: number[][];
+  dryRun: boolean;
+}
+
+export interface MoveEventInput {
+  scene: string;
+  from: EventSelector;
+  toPosition: number;
+  toParent?: EventSelector | undefined;
+  dryRun?: boolean | undefined;
+}
+
+export interface RemoveEventInput {
+  scene: string;
+  target: EventSelector;
+  dryRun?: boolean | undefined;
+}
+
 /** Default behavior name: short type name (after the last `::`). */
 export function shortBehaviorName(type: string): string {
   const short = type.split('::').pop() ?? type;
@@ -206,4 +337,12 @@ export interface EnginePorts {
   removeObjectFromGroup(project: EngineProject, scene: string | undefined, group: string, object: string): void;
   importResource(project: EngineProject, input: ImportResourceInput): { name: string };
   removeResource(project: EngineProject, name: string): void;
+  // --- Events (ticket #14). Every method validates everything before
+  // mutating anything and throws `validation-failed` on refusal, so a
+  // rejected call leaves the project untouched. Ids are stamped at creation
+  // via `setAiGeneratedEventId` and resolved by traversal. ---
+  appendSceneEvents(project: EngineProject, input: AppendEventsInput): AppendEventsResult;
+  moveSceneEvent(project: EngineProject, input: MoveEventInput): { moved: boolean; dryRun: boolean };
+  removeSceneEvent(project: EngineProject, input: RemoveEventInput): { removed: boolean; dryRun: boolean };
+  validateSceneEvents(project: EngineProject, scene: string, events: EventNodeInput[]): { valid: boolean; errors: string[] };
 }

@@ -3,15 +3,20 @@ import assert from 'node:assert/strict';
 import { z } from 'zod';
 import { McpError } from '../src/errors.js';
 import type {
+  AppendEventsInput,
+  AppendEventsResult,
   AttachBehaviorInput,
   CreateObjectInput,
   EngineDiagnostic,
   EnginePorts,
   EngineProject,
+  EventNodeInput,
   ImportResourceInput,
+  MoveEventInput,
   PlaceInstanceInput,
   ProjectSummary,
   RemoveBehaviorInput,
+  RemoveEventInput,
   UpdateBehaviorInput,
   UpdateInstancePatch,
   VariableTarget,
@@ -19,6 +24,7 @@ import type {
 import type { ContentView, JsonValue } from '../src/contentView.js';
 import {
   addObjectToGroup,
+  appendSceneEvents,
   attachBehavior,
   blankContentState,
   createGroup,
@@ -34,12 +40,14 @@ import {
   moveInstancesToLayer,
   moveLayer,
   moveScene,
+  moveSceneEvent,
   placeInstance,
   removeBehavior,
   removeInstance,
   removeInstancesOfObject,
   removeObjectFromGroup,
   removeResource,
+  removeSceneEvent,
   removeVariable,
   renameLayer,
   renameObject,
@@ -48,6 +56,7 @@ import {
   setVariable,
   updateBehavior,
   updateInstance,
+  validateSceneEvents,
   type FakeContentState,
 } from './fakeContent.js';
 
@@ -77,10 +86,16 @@ function normalizeState(parsed: Record<string, unknown>, name: string): FakeCont
   const resources = Array.isArray(rawResources)
     ? rawResources
     : (rawResources as { resources?: unknown } | null)?.resources;
+  const layouts = asArray(parsed['layouts']) as unknown as FakeContentState['layouts'];
+  for (const layout of layouts) {
+    if (!Array.isArray((layout as { events?: unknown }).events)) {
+      (layout as { events: unknown }).events = [];
+    }
+  }
   return {
     name: typeof parsed['name'] === 'string' ? (parsed['name'] as string) : name,
     projectFile: typeof parsed['projectFile'] === 'string' ? (parsed['projectFile'] as string) : '',
-    layouts: asArray(parsed['layouts']) as unknown as FakeContentState['layouts'],
+    layouts,
     objects: asArray(parsed['objects']) as unknown as FakeContentState['objects'],
     variables: asArray(parsed['variables']) as unknown as FakeContentState['variables'],
     objectsGroups: asArray(parsed['objectsGroups']) as unknown as FakeContentState['objectsGroups'],
@@ -138,10 +153,12 @@ export function createFakeEngine(
       const state = (project as FakeProject).state;
       let objectCount = state.objects.length;
       let behaviorCount = 0;
+      let eventCount = 0;
       for (const object of state.objects) behaviorCount += object.behaviors.length;
       for (const layout of state.layouts) {
         objectCount += layout.objects.length;
         for (const object of layout.objects) behaviorCount += object.behaviors.length;
+        eventCount += (layout.events ?? []).length;
       }
       return {
         name: state.name,
@@ -150,7 +167,7 @@ export function createFakeEngine(
         objectCount,
         behaviorCount,
         globalVariableCount: state.variables.length,
-        eventCount: 0,
+        eventCount,
       };
     },
     describeContent(project: EngineProject): ContentView {
@@ -244,6 +261,22 @@ export function createFakeEngine(
     },
     removeResource(project: EngineProject, name: string): void {
       removeResource((project as FakeProject).state, name);
+    },
+    appendSceneEvents(project: EngineProject, input: AppendEventsInput): AppendEventsResult {
+      return appendSceneEvents((project as FakeProject).state, input);
+    },
+    moveSceneEvent(project: EngineProject, input: MoveEventInput): { moved: boolean; dryRun: boolean } {
+      return moveSceneEvent((project as FakeProject).state, input);
+    },
+    removeSceneEvent(project: EngineProject, input: RemoveEventInput): { removed: boolean; dryRun: boolean } {
+      return removeSceneEvent((project as FakeProject).state, input);
+    },
+    validateSceneEvents(
+      project: EngineProject,
+      scene: string,
+      events: EventNodeInput[],
+    ): { valid: boolean; errors: string[] } {
+      return validateSceneEvents((project as FakeProject).state, scene, events);
     },
     setProjectName(project: EngineProject, name: string): void {
       (project as FakeProject).state.name = name;
