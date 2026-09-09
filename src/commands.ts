@@ -1,6 +1,6 @@
 import { copyFileSync, existsSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { formatDiagnostics, isBlockingDiagnostic, type EnginePorts, type ProjectSummary } from './engine.js';
+import { formatDiagnostics, isBlockingDiagnostic, type ContentView, type EnginePorts, type ProjectSummary } from './engine.js';
 import { McpError, validationFailed } from './errors.js';
 import type { ProjectStore } from './sessions.js';
 
@@ -26,13 +26,14 @@ export function openProject(deps: CommandDeps, args: { path: string }): { sessio
 export function describeProject(
   deps: CommandDeps,
   args: { sessionId: string },
-): ProjectSummary & { sessionId: string; dirty: boolean; filePath: string | null } {
+): ProjectSummary & { sessionId: string; dirty: boolean; filePath: string | null; content: ContentView } {
   const session = deps.store.get(args.sessionId);
   return {
     sessionId: session.id,
     dirty: session.dirty,
     filePath: session.filePath,
     ...deps.engine.describeProject(session.project),
+    content: deps.engine.describeContent(session.project),
   };
 }
 

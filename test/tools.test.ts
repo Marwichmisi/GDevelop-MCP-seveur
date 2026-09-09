@@ -4,7 +4,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ProjectStore } from '../src/sessions.js';
-import { createProjectTools } from '../src/tools.js';
+import { createContentTools, createProjectTools } from '../src/tools.js';
 import { createServer } from '../src/server.js';
 import { McpError } from '../src/errors.js';
 import { createFakeEngine } from './fakeEngine.js';
@@ -17,6 +17,15 @@ function makeDeps() {
 
 function handler(
   tools: ReturnType<typeof createProjectTools>,
+  name: string,
+): (args: Record<string, unknown>) => Promise<{ content: { type: 'text'; text: string }[] }> {
+  const tool = tools.find((candidate) => candidate.name === name);
+  assert.ok(tool, `tool ${name} registered`);
+  return tool.handler;
+}
+
+function contentHandler(
+  tools: ReturnType<typeof createContentTools>,
   name: string,
 ): (args: Record<string, unknown>) => Promise<{ content: { type: 'text'; text: string }[] }> {
   const tool = tools.find((candidate) => candidate.name === name);
@@ -67,5 +76,39 @@ describe('project tools (command seam, never the transport)', () => {
   it('createServer wires the tools without connecting any transport', async () => {
     const server = createServer(makeDeps());
     assert.ok(server);
+  });
+
+  it('exposes the 28 content tools with the ticket payloads', () => {
+    const tools = createContentTools(makeDeps());
+    assert.deepEqual(
+      tools.map((tool) => tool.name).sort(),
+      [
+        'add_object', 'add_to_group', 'attach_behavior', 'create_group', 'create_layer', 'create_scene',
+        'delete_group', 'delete_layer', 'delete_scene', 'import_resource', 'move_instances_to_layer',
+        'move_layer', 'move_scene', 'place_instance', 'remove_behavior', 'remove_from_group', 'remove_instance',
+        'remove_instances_of_object', 'remove_object', 'remove_resource', 'remove_variable', 'rename_layer',
+        'rename_object', 'rename_scene', 'rename_variable', 'set_variable', 'update_behavior', 'update_instance',
+      ].sort(),
+    );
+  });
+
+  it('content handlers run the full tool chain (scene → object → instance)', async () => {
+    const deps = makeDeps();
+    const tools = [...createProjectTools(deps), ...createContentTools(deps)];
+    const created = JSON.parse(
+      ((await handler(tools, 'create_project')({ name: 'Via tools' })).content[0] as { text: string }).text,
+    ) as { sessionId: string };
+    const sessionId = created.sessionId;
+    await contentHandler(tools, 'create_scene')({ sessionId, name: 'Niveau1' });
+    await contentHandler(tools, 'add_object')({ sessionId, scene: 'Niveau1', type: 'Sprite', name: 'Joueur' });
+    const placed = JSON.parse(
+      ((await contentHandler(tools, 'place_instance')({ sessionId, scene: 'Niveau1', object: 'Joueur', x: 100, y: 200 })).content[0] as { text: string }).text,
+    ) as { instanceId: string };
+    assert.match(placed.instanceId, /^[0-9a-f-]{36}$/);
+    const described = JSON.parse(
+      ((await handler(tools, 'describe_project')({ sessionId })).content[0] as { text: string }).text,
+    ) as { content: { scenes: { name: string; instances: { x: number }[] }[] } };
+    assert.equal(described.content.scenes[0]?.name, 'Niveau1');
+    assert.equal(described.content.scenes[0]?.instances[0]?.x, 100);
   });
 });

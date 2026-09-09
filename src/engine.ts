@@ -8,10 +8,15 @@
  * tickets extend it (layouts, objects, events, …).
  */
 
+import type { ContentView, JsonValue } from './contentView.js';
+import { validationFailed } from './errors.js';
+
 /** Opaque engine object. Only the engine implementation may touch it. */
 export interface EngineProject {
   delete(): void;
 }
+
+export type { ContentView, JsonValue };
 
 /** The four blocking diagnostic types (ProjectDiagnostic_ErrorType). Any new
  *  error of these kinds after a mutation refuses the write. Single source of
@@ -49,6 +54,116 @@ export interface ProjectSummary {
   eventCount: number;
 }
 
+/** Inline behavior declaration for object creation and behavior attach. */
+export interface BehaviorInput {
+  type: string;
+  name?: string | undefined;
+  properties?: Record<string, string | number | boolean> | undefined;
+}
+
+export interface CreateObjectInput {
+  /** Absent = project-level (global) object, present = scene object. */
+  scene?: string | undefined;
+  type: string;
+  name: string;
+  behaviors?: BehaviorInput[] | undefined;
+  variables?: Record<string, JsonValue> | undefined;
+  /** Sprite collision-mask flag; refused on other object types. */
+  collisionMaskAutomatic?: boolean | undefined;
+}
+
+export interface AttachBehaviorInput {
+  scene?: string | undefined;
+  object: string;
+  type: string;
+  name?: string | undefined;
+  properties?: Record<string, string | number | boolean> | undefined;
+}
+
+export interface UpdateBehaviorInput {
+  scene?: string | undefined;
+  object: string;
+  name: string;
+  properties: Record<string, string | number | boolean>;
+}
+
+export interface RemoveBehaviorInput {
+  scene?: string | undefined;
+  object: string;
+  name: string;
+}
+
+export interface PlaceInstanceInput {
+  scene: string;
+  object: string;
+  x: number;
+  y: number;
+  z?: number | undefined;
+  layer?: string | undefined;
+  zOrder?: number | undefined;
+  angle?: number | undefined;
+  opacity?: number | undefined;
+  width?: number | undefined;
+  height?: number | undefined;
+  keepRatio?: boolean | undefined;
+  variables?: Record<string, JsonValue> | undefined;
+}
+
+export interface UpdateInstancePatch {
+  object?: string | undefined;
+  x?: number | undefined;
+  y?: number | undefined;
+  z?: number | undefined;
+  layer?: string | undefined;
+  zOrder?: number | undefined;
+  angle?: number | undefined;
+  opacity?: number | undefined;
+  width?: number | undefined;
+  height?: number | undefined;
+  keepRatio?: boolean | undefined;
+  /** Merged per key over the instance variables. */
+  variables?: Record<string, JsonValue> | undefined;
+}
+
+export type VariableScope = 'global' | 'scene' | 'object' | 'instance';
+
+export interface VariableTarget {
+  scope: VariableScope;
+  scene?: string | undefined;
+  object?: string | undefined;
+  instanceId?: string | undefined;
+}
+
+export interface ImportResourceInput {
+  name: string;
+  kind: string;
+  /** Project-relative file path of the already-copied binary. */
+  file: string;
+}
+
+/** Default behavior name: short type name (after the last `::`). */
+export function shortBehaviorName(type: string): string {
+  const short = type.split('::').pop() ?? type;
+  if (short === '') throw validationFailed(`Behavior type must not be empty.`);
+  return short;
+}
+
+/** Resource kinds accepted by import_resource (each maps to an engine resource class). */
+export const SUPPORTED_RESOURCE_KINDS = [
+  'image',
+  'audio',
+  'font',
+  'bitmapFont',
+  'video',
+  'json',
+  'atlas',
+  'tilemap',
+  'tileset',
+  'spine',
+  'model3d',
+  'javascript',
+] as const;
+
 export interface EnginePorts {
   createProject(name: string): EngineProject;
   loadProjectFromJson(json: string, projectFile: string): EngineProject;
@@ -57,6 +172,38 @@ export interface EnginePorts {
   listDiagnostics(project: EngineProject): EngineDiagnostic[];
   updateBehaviorsSharedData(project: EngineProject): void;
   describeProject(project: EngineProject): ProjectSummary;
+  describeContent(project: EngineProject): ContentView;
   setProjectName(project: EngineProject, name: string): void;
   setProjectFile(project: EngineProject, path: string): void;
+  // --- Content (ticket #13). Every method validates everything before
+  // mutating anything and throws `validation-failed` on refusal, so a
+  // rejected call leaves the project untouched. ---
+  createScene(project: EngineProject, name: string): void;
+  renameScene(project: EngineProject, oldName: string, newName: string): void;
+  moveScene(project: EngineProject, name: string, position: number): void;
+  deleteScene(project: EngineProject, name: string): void;
+  createLayer(project: EngineProject, scene: string, name: string): void;
+  renameLayer(project: EngineProject, scene: string, oldName: string, newName: string): void;
+  moveLayer(project: EngineProject, scene: string, name: string, position: number): void;
+  deleteLayer(project: EngineProject, scene: string, name: string): void;
+  createObject(project: EngineProject, input: CreateObjectInput): void;
+  renameObject(project: EngineProject, scene: string | undefined, oldName: string, newName: string): void;
+  deleteObject(project: EngineProject, scene: string | undefined, name: string): void;
+  attachBehavior(project: EngineProject, input: AttachBehaviorInput): { name: string };
+  updateBehavior(project: EngineProject, input: UpdateBehaviorInput): void;
+  removeBehavior(project: EngineProject, input: RemoveBehaviorInput): void;
+  placeInstance(project: EngineProject, input: PlaceInstanceInput): { instanceId: string };
+  updateInstance(project: EngineProject, scene: string, instanceId: string, patch: UpdateInstancePatch): void;
+  removeInstance(project: EngineProject, scene: string, instanceId: string): void;
+  removeInstancesOfObject(project: EngineProject, scene: string, object: string): { removed: number };
+  moveInstancesToLayer(project: EngineProject, scene: string, sourceLayer: string, targetLayer: string): { moved: number };
+  setVariable(project: EngineProject, target: VariableTarget, name: string, value: JsonValue): void;
+  removeVariable(project: EngineProject, target: VariableTarget, name: string): void;
+  renameVariable(project: EngineProject, target: VariableTarget, oldName: string, newName: string): void;
+  createGroup(project: EngineProject, scene: string | undefined, name: string, objects: string[]): void;
+  deleteGroup(project: EngineProject, scene: string | undefined, name: string): void;
+  addObjectToGroup(project: EngineProject, scene: string | undefined, group: string, object: string): void;
+  removeObjectFromGroup(project: EngineProject, scene: string | undefined, group: string, object: string): void;
+  importResource(project: EngineProject, input: ImportResourceInput): { name: string };
+  removeResource(project: EngineProject, name: string): void;
 }

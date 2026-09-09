@@ -4,7 +4,7 @@ Serveur MCP GDevelop over libGD.js — chaque session projet est un vrai
 `gd.Project` en mémoire, jamais du JSON édité à l'aveugle. La sérialisation
 vers le `.json` n'intervient qu'au save final.
 
-Ticket : [#12 Scaffold + première balle traçante](https://github.com/Marwichmisi/GDevelop-MCP-seveur/issues/12) ·
+Ticket : [#13 Contenu granulaire](https://github.com/Marwichmisi/GDevelop-MCP-seveur/issues/13) ·
 Spec : [#11](https://github.com/Marwichmisi/GDevelop-MCP-seveur/issues/11).
 
 ## Prérequis
@@ -67,8 +67,22 @@ démarrage). Exemple de premier prompt : « Crée un projet GDevelop nommé
 | `GDEVELOP_LIBGD_PIN` | `vendor/libgd-pin.json` | Fichier pin du provisioning |
 | `GDEVELOP_VENDOR_DIR` | `vendor/` | Destination du provisioning |
 
-## Outils (scaffold)
+## Outils
 
-`create_project`, `open_project`, `describe_project`, `save_project`,
-`close_project`. Couche commande headless `(store, engine, args)` testée via
-doubles factices ; les outils sont de fins wrappers zod.
+Lifecycle : `create_project`, `open_project`, `describe_project`,
+`save_project`, `close_project` (`describe_project` expose aussi `content` :
+scènes, objets, instances, variables, groupes, ressources).
+
+Contenu (EN `snake_case`, même payloads qu'en batch à venir) : scènes
+(`create/rename/move/delete_scene`), layers (`create/rename/move/delete_layer`,
+calque de base `""` protégé), objets (`add/rename/remove_object`, behaviors
+inline, variables, `collisionMaskAutomatic` Sprite), behaviors
+(`attach/update/remove_behavior`, noms de propriétés insensibles à la casse,
+booléens `"1"/"0"`), instances (`place/update/remove_instance` par id,
+`remove_instances_of_object`, `move_instances_to_layer`), variables libres
+(`set/remove/rename_variable`, scopes global/scene/object/instance, pas de
+`null`), groupes (`create/delete_group`, `add/remove_to/from_group`),
+ressources (`import/remove_resource`, binaire copié près du projet).
+
+Couche commande headless `(store, engine, args)` testée via doubles
+factices ; les outils sont de fins wrappers zod.
