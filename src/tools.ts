@@ -39,6 +39,20 @@ import {
   removeSceneEvent,
   validateSceneEvents,
 } from './events.js';
+import {
+  catalogSchemas,
+  catalogStatus,
+  describeBehavior,
+  describeExtension,
+  describeInstructions,
+  describeObject,
+  listBehaviorTypes,
+  listExtensions,
+  listInstructions,
+  listObjectTypes,
+  searchInstructions,
+  type Catalog,
+} from './catalog.js';
 
 export interface ToolDefinition {
   name: string;
@@ -95,8 +109,10 @@ export function createProjectTools(deps: CommandDeps): ToolDefinition[] {
   ];
 }
 
-export function registerProjectTools(server: McpServer, deps: CommandDeps): void {
-  for (const tool of [...createProjectTools(deps), ...createContentTools(deps), ...createEventTools(deps)]) {
+export function registerProjectTools(server: McpServer, deps: CommandDeps, catalog?: Catalog): void {
+  const tools = [...createProjectTools(deps), ...createContentTools(deps), ...createEventTools(deps)];
+  if (catalog) tools.push(...createCatalogTools(catalog));
+  for (const tool of tools) {
     server.registerTool(tool.name, { description: tool.description, inputSchema: tool.inputSchema }, tool.handler);
   }
 }
@@ -222,3 +238,99 @@ export function createEventTools(deps: CommandDeps): ToolDefinition[] {
     ),
   ];
 }
+
+function catalogTool<K extends keyof typeof catalogSchemas>(
+  name: string,
+  description: string,
+  schemaKey: K,
+  command: (catalog: Catalog, args: unknown) => unknown,
+  catalog: Catalog,
+): ToolDefinition {
+  return {
+    name,
+    description,
+    inputSchema: catalogSchemas[schemaKey].shape,
+    handler: async (args) => text(await command(catalog, args)),
+  };
+}
+
+/**
+ * The 10 read-only catalogue tools (ticket #15). They never touch a session:
+ * they read the pinned GDevelop sources through `Catalog` and expose the pinned
+ * ref/sha on every payload. The engine still judges every write.
+ */
+export function createCatalogTools(catalog: Catalog): ToolDefinition[] {
+  return [
+    catalogTool(
+      'catalog_status',
+      'Show the pinned catalogue versions (ref, sha, syncedAt), staleness vs the latest GDevelop release, and indexed counts. refresh:true re-reads the pinned sources.',
+      'status',
+      catalogStatus,
+      catalog,
+    ),
+    catalogTool(
+      'list_instructions',
+      'List pinned GDevelop instructions (actions, conditions, expressions, str-expressions) with parameters. English as written in the sources; the engine judges at write time.',
+      'listInstructions',
+      listInstructions,
+      catalog,
+    ),
+    catalogTool(
+      'search_instructions',
+      'Search pinned GDevelop instructions by case-insensitive query over type, full name, description and extension.',
+      'searchInstructions',
+      searchInstructions,
+      catalog,
+    ),
+    catalogTool(
+      'describe_instructions',
+      'Describe every pinned catalogue entry matching an instruction type (duals share a type across kinds).',
+      'describeInstructions',
+      describeInstructions,
+      catalog,
+    ),
+    catalogTool(
+      'list_object_types',
+      'List object types declared by the pinned GDevelop extensions, with their full engine type (Extension::Name).',
+      'listObjectTypes',
+      listObjectTypes,
+      catalog,
+    ),
+    catalogTool(
+      'list_behavior_types',
+      'List behavior types declared by the pinned GDevelop extensions, with their full engine type (Extension::Name).',
+      'listBehaviorTypes',
+      listBehaviorTypes,
+      catalog,
+    ),
+    catalogTool(
+      'describe_object',
+      'Describe an object type from the pinned catalogue (extension, source file, events-based flag).',
+      'describeObject',
+      describeObject,
+      catalog,
+    ),
+    catalogTool(
+      'describe_behavior',
+      'Describe a behavior type from the pinned catalogue (extension, source file, events-based flag).',
+      'describeBehavior',
+      describeBehavior,
+      catalog,
+    ),
+    catalogTool(
+      'list_extensions',
+      'List extensions found in the pinned GDevelop sources with their instruction/object/behavior counts and events-based declarations.',
+      'listExtensions',
+      listExtensions,
+      catalog,
+    ),
+    catalogTool(
+      'describe_extension',
+      'Describe one pinned extension by name (full name, description, counts, events-based objects/behaviors).',
+      'describeExtension',
+      describeExtension,
+      catalog,
+    ),
+  ];
+}
+

@@ -66,6 +66,8 @@ démarrage). Exemple de premier prompt : « Crée un projet GDevelop nommé
 | `GDEVELOP_LOAD_EXTENSIONS` | `true` | `false` pour sauter le chargement des extensions |
 | `GDEVELOP_LIBGD_PIN` | `vendor/libgd-pin.json` | Fichier pin du provisioning |
 | `GDEVELOP_VENDOR_DIR` | `vendor/` | Destination du provisioning |
+| `GDEVELOP_CATALOG_REF` | dernière release GDevelop | Ref pinnée du catalogue (tag/branche/sha) |
+| `GDEVELOP_CATALOG_CACHE` | `~/.cache/gdevelop-mcp` | Cache disque du catalogue pinné |
 
 ## Outils
 
@@ -83,6 +85,18 @@ booléens `"1"/"0"`), instances (`place/update/remove_instance` par id,
 (`set/remove/rename_variable`, scopes global/scene/object/instance, pas de
 `null`), groupes (`create/delete_group`, `add/remove_to/from_group`),
 ressources (`import/remove_resource`, binaire copié près du projet).
+
+Événements natifs (EN `snake_case`) : `append_scene_events` (arbre `kind`,
+validation L1+L2, JsCode marqueur seul), `move/remove/validate_scene_events`
+(par sélecteur `{path}|{id}`).
+
+Catalogue (lecture seule, EN brut, jamais de validation) :
+`catalog_status` (pin ref+sha, périmé oui/non), `list/search/describe_instructions`
+(actions, conditions, expressions, str-expressions + duals),
+`list_object_types`, `list_behavior_types`, `describe_object/behavior`,
+`list/describe_extensions` (incl. customs `eventsBased*`). Sources : dépôt
+GDevelop pinné (ref+sha), registres live + TTL 1 h, préfixe `GDEVELOP_CATALOG_*`.
+Le catalogue aide, le moteur juge.
 
 Couche commande headless `(store, engine, args)` testée via doubles
 factices ; les outils sont de fins wrappers zod.

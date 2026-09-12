@@ -4,8 +4,10 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ProjectStore } from '../src/sessions.js';
-import { createContentTools, createProjectTools } from '../src/tools.js';
+import { createContentTools, createCatalogTools, createProjectTools } from '../src/tools.js';
 import { createServer } from '../src/server.js';
+import { Catalog } from '../src/catalog.js';
+import { makeFixtureSource } from './catalogFixtures.js';
 import { McpError } from '../src/errors.js';
 import { createFakeEngine } from './fakeEngine.js';
 
@@ -112,3 +114,52 @@ describe('project tools (command seam, never the transport)', () => {
     assert.equal(described.content.scenes[0]?.instances[0]?.x, 100);
   });
 });
+
+describe('catalogue tools (ticket #15)', () => {
+  it('exposes exactly the 10 read-only catalogue tools', () => {
+    const catalog = new Catalog(makeFixtureSource());
+    assert.deepEqual(
+      createCatalogTools(catalog)
+        .map((tool) => tool.name)
+        .sort(),
+      [
+        'catalog_status',
+        'describe_behavior',
+        'describe_extension',
+        'describe_instructions',
+        'describe_object',
+        'list_behavior_types',
+        'list_extensions',
+        'list_instructions',
+        'list_object_types',
+        'search_instructions',
+      ].sort(),
+    );
+  });
+
+  it('handlers return JSON text with the pinned ref exposed', async () => {
+    const catalog = new Catalog(makeFixtureSource());
+    const tools = createCatalogTools(catalog);
+    const status = tools.find((tool) => tool.name === 'catalog_status');
+    assert.ok(status);
+    const payload = JSON.parse(
+      ((await status.handler({})).content[0] as { text: string }).text,
+    ) as { pin: { ref: string }; stale: boolean };
+    assert.equal(payload.pin.ref, 'v5.6.282');
+    assert.equal(payload.stale, false);
+
+    const search = tools.find((tool) => tool.name === 'search_instructions');
+    assert.ok(search);
+    const found = JSON.parse(
+      ((await search.handler({ query: 'variable' })).content[0] as { text: string }).text,
+    ) as { matched: number };
+    assert.equal(found.matched, 4);
+  });
+
+  it('createServer registers the catalogue tools when a catalog is provided', () => {
+    const deps = makeDeps();
+    const server = createServer(deps, { catalog: new Catalog(makeFixtureSource()) });
+    assert.ok(server);
+  });
+});
+

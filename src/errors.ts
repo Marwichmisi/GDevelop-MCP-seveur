@@ -8,7 +8,8 @@ export type McpErrorCode =
   | 'validation-failed'
   | 'post-apply-failed'
   | 'io-error'
-  | 'libgd-unavailable';
+  | 'libgd-unavailable'
+  | 'catalog-unavailable';
 
 export class McpError extends Error {
   readonly code: McpErrorCode;
