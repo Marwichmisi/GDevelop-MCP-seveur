@@ -46,3 +46,50 @@ describe('diffContentView (securite edition, ticket #17)', () => {
     assert.deepEqual(diff.variables.removed, ['scene/N/lives']);
   });
 });
+  it('detecte les objets, instances et evenements modifies', () => {
+    const before = blankView();
+    const scene = sceneView('N');
+    scene.objects.push({ name: 'Joueur', type: 'Sprite', behaviors: [], variables: {} });
+    scene.instances.push({
+      id: 'i1',
+      object: 'Joueur',
+      x: 0,
+      y: 0,
+      z: 0,
+      layer: '',
+      zOrder: 0,
+      angle: 0,
+      opacity: 255,
+      customSize: false,
+      width: 0,
+      height: 0,
+      variables: {},
+    });
+    scene.events.push({ id: 'e1', kind: 'standard', disabled: false, conditions: [], actions: [], events: [] });
+    before.scenes.push(scene);
+    const after = structuredClone(before);
+    const afterScene = after.scenes[0];
+    if (!afterScene) throw new Error('missing scene');
+    const player = afterScene.objects[0];
+    if (player) player.variables = { hp: 3 };
+    const inst = afterScene.instances[0];
+    if (inst) inst.x = 42;
+    const evt = afterScene.events[0];
+    if (evt) evt.disabled = true;
+    const diff = diffContentView(before, after);
+    assert.deepEqual(diff.objects.modified, ['scene/N/Joueur']);
+    assert.deepEqual(diff.instances.modified, ['scene/N/i1']);
+    assert.deepEqual(diff.events.modified, ['scene/N/0:e1']);
+    const back = diffContentView(after, before);
+    assert.equal(back.empty, false);
+  });
+
+  it('detecte les groupes et ressources ajoutees', () => {
+    const before = blankView();
+    const after = blankView();
+    after.globalGroups.push({ name: 'Ennemis', objects: ['Blob'] });
+    after.resources.push({ name: 'hero.png', kind: 'image', file: 'hero.png' });
+    const diff = diffContentView(before, after);
+    assert.deepEqual(diff.groups.added, ['global/Ennemis']);
+    assert.deepEqual(diff.resources.added, ['hero.png']);
+  });

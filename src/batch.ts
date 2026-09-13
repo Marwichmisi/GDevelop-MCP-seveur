@@ -4,7 +4,7 @@ import { z } from 'zod';
 import type { CommandDeps } from './commands.js';
 import * as contentCmds from './content.js';
 import { diffContentView, type ContentDiff } from './contentDiff.js';
-import { formatDiagnostics, isBlockingDiagnostic } from './engine.js';
+import { formatDiagnostics, isBlockingDiagnostic, type EngineDiagnostic } from './engine.js';
 import { McpError, validationFailed } from './errors.js';
 import * as eventCmds from './events.js';
 
@@ -103,7 +103,8 @@ function failAt(index: number, total: number, op: string, error: unknown): never
 interface TrackedFile {
   path: string;
   existed: boolean;
-  backup: string | null;
+  /** Copie de compensation du binaire écrasé (null si le fichier n'existait pas). */
+  compensationPath: string | null;
 }
 
 // import_resource copie un binaire avant runMutation : suivi pour compensation batch.
@@ -117,10 +118,12 @@ function trackImportFile(deps: CommandDeps, sessionId: string, payload: unknown)
   const source = typeof record['sourcePath'] === 'string' ? (record['sourcePath'] as string) : null;
   if (!source) return null;
   const destination = join(dirname(target), basename(deps.store.resolvePath(source)));
-  if (!existsSync(destination)) return { path: destination, existed: false, backup: null };
-  const backup = `${destination}.batch-bak-${process.pid}-${Date.now()}`;
-  writeFileSync(backup, readFileSync(destination));
-  return { path: destination, existed: true, backup };
+  if (!existsSync(destination)) return { path: destination, existed: false, compensationPath: null };
+  // Copie de compensation d'une ressource importée — distincte du Backup projet
+  // `<projet>.bak-<ISO>` : elle annule l'écrasement du binaire si le batch rollback.
+  const compensationPath = `${destination}.batch-comp-${process.pid}-${Date.now()}`;
+  writeFileSync(compensationPath, readFileSync(destination));
+  return { path: destination, existed: true, compensationPath };
 }
 
 function rollbackFiles(tracked: TrackedFile[]): void {
@@ -130,9 +133,9 @@ function rollbackFiles(tracked: TrackedFile[]): void {
     try {
       if (!file.existed) {
         if (existsSync(file.path)) unlinkSync(file.path);
-      } else if (file.backup !== null && existsSync(file.backup)) {
-        writeFileSync(file.path, readFileSync(file.backup));
-        unlinkSync(file.backup);
+      } else if (file.compensationPath !== null && existsSync(file.compensationPath)) {
+        writeFileSync(file.path, readFileSync(file.compensationPath));
+        unlinkSync(file.compensationPath);
       }
     } catch {
       // Best effort : la restauration mémoire reste la garantie d'atomicité.
@@ -140,11 +143,11 @@ function rollbackFiles(tracked: TrackedFile[]): void {
   }
 }
 
-function cleanupBackups(tracked: TrackedFile[]): void {
+function cleanupCompensations(tracked: TrackedFile[]): void {
   for (const file of tracked) {
-    if (file.backup !== null) {
+    if (file.compensationPath !== null) {
       try {
-        if (existsSync(file.backup)) unlinkSync(file.backup);
+        if (existsSync(file.compensationPath)) unlinkSync(file.compensationPath);
       } catch {
         // Best effort.
       }
@@ -163,7 +166,20 @@ export function applyContentBatch(deps: CommandDeps, args: unknown): BatchApplyR
   const parsed = batchSchema.parse(args);
   const session = deps.store.get(parsed.sessionId);
 
-  const baselineBlocking = deps.engine.listDiagnostics(session.project).filter(isBlockingDiagnostic);
+  // Étage pré-batch : lecture baseline + snapshot global. Toute panne ici
+  // survient avant la première op : rien n'a été appliqué, ni mémoire ni disque.
+  let baselineBlocking: EngineDiagnostic[];
+  let snapshot: string;
+  try {
+    baselineBlocking = deps.engine.listDiagnostics(session.project).filter(isBlockingDiagnostic);
+    snapshot = deps.engine.serializeProject(session.project);
+  } catch (error) {
+    throw new McpError(
+      'post-apply-failed',
+      `Batch failed before any op ran (${error instanceof Error ? error.message : String(error)}); nothing was applied.`,
+      { cause: error },
+    );
+  }
   if (baselineBlocking.length > 0 && parsed.allowInvalidBaseline !== true) {
     throw validationFailed(
       `Refusing batch: project baseline has blocking errors (${formatDiagnostics(baselineBlocking)}). Pass allowInvalidBaseline:true to override.`,
@@ -183,7 +199,6 @@ export function applyContentBatch(deps: CommandDeps, args: unknown): BatchApplyR
     }
   }
 
-  const snapshot = deps.engine.serializeProject(session.project);
   const before = deps.engine.describeContent(session.project);
   const wasDirty = session.dirty;
   const tracked: TrackedFile[] = [];
@@ -194,6 +209,12 @@ export function applyContentBatch(deps: CommandDeps, args: unknown): BatchApplyR
     deps.engine.restoreProject(session.project, snapshot);
     if (wasDirty) deps.store.markDirty(session.id);
     else deps.store.clearDirty(session.id);
+  };
+
+  // Tout-ou-rien : restaure la mémoire + dirty + les fichiers de ressources suivis.
+  const undoEverything = (): void => {
+    rollbackFiles(tracked);
+    restoreMemory();
   };
 
   try {
@@ -212,8 +233,7 @@ export function applyContentBatch(deps: CommandDeps, args: unknown): BatchApplyR
         const summary = handler(deps, entry.payload);
         results.push({ op: entry.op, ok: true, summary });
       } catch (error) {
-        rollbackFiles(tracked);
-        restoreMemory();
+        undoEverything();
         failAt(i, parsed.ops.length, entry.op, error);
       }
     }
@@ -225,8 +245,7 @@ export function applyContentBatch(deps: CommandDeps, args: unknown): BatchApplyR
       const reparsed = deps.engine.loadProjectFromJson(serialized, '');
       reparsed.delete();
     } catch (error) {
-      rollbackFiles(tracked);
-      restoreMemory();
+      undoEverything();
       if (error instanceof McpError) {
         throw new McpError(error.code, `Batch produced a project that no longer round-trips; everything was restored.`, { cause: error });
       }
@@ -238,8 +257,7 @@ export function applyContentBatch(deps: CommandDeps, args: unknown): BatchApplyR
       .listDiagnostics(session.project)
       .filter((d) => !baselineKeys.has(`${d.type}::${d.message}`) && isBlockingDiagnostic(d));
     if (newBlocking.length > 0) {
-      rollbackFiles(tracked);
-      restoreMemory();
+      undoEverything();
       throw new McpError(
         'post-apply-failed',
         `Batch introduced blocking errors (${formatDiagnostics(newBlocking)}); everything was restored.`,
@@ -250,18 +268,18 @@ export function applyContentBatch(deps: CommandDeps, args: unknown): BatchApplyR
     const diff = diffContentView(before, after);
 
     if (isDryRun) {
-      rollbackFiles(tracked);
-      restoreMemory();
+      // dryRun : même en cas d'import_resource, la copie disque est immédiatement
+      // compensée — aucun binaire ne subsiste, ni mutation ni dirty.
+      undoEverything();
       return { applied: parsed.ops.length, results, diff, dryRun: true };
     }
 
-    cleanupBackups(tracked);
+    cleanupCompensations(tracked);
     deps.store.markDirty(session.id);
     return { applied: parsed.ops.length, results, diff, dryRun: false };
   } catch (error) {
     if (error instanceof McpError) throw error;
-    rollbackFiles(tracked);
-    restoreMemory();
+    undoEverything();
     throw new McpError('post-apply-failed', `Batch failed (${error instanceof Error ? error.message : String(error)}); everything was restored.`, { cause: error });
   }
 }

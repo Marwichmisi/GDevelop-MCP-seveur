@@ -1,11 +1,11 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { McpError } from '../src/errors.js';
 import { ProjectStore } from '../src/sessions.js';
-import { createProject, describeProject, type CommandDeps } from '../src/commands.js';
+import { createProject, describeProject, saveProject, type CommandDeps } from '../src/commands.js';
 import { applyContentBatch, type BatchOpResult } from '../src/batch.js';
 import { createFakeEngine } from './fakeEngine.js';
 
@@ -180,5 +180,128 @@ describe('batch: compensation disque import_resource (ticket #17)', () => {
     assert.equal(result.dryRun, true);
     assert.ok(!existsSync(join(projectDir, 'hero.png')));
     assert.equal(deps.store.get(sessionId).dirty, false);
+  });
+});
+describe('injections d échec à chaque étage du pipeline (AC #4, ticket #17)', () => {
+  const listDir = (dir: string): string[] => readdirSync(dir).sort();
+
+  it('étage pré-batch : échec du snapshot global refuse avant la première op', () => {
+    const deps = makeDeps();
+    const sessionId = makeSession(deps);
+    const before = snap(deps, sessionId);
+    const realSerialize = deps.engine.serializeProject.bind(deps.engine);
+    deps.engine.serializeProject = ((): string => {
+      throw new Error('injected pre-batch snapshot failure');
+    }) as typeof realSerialize;
+    try {
+      assert.throws(
+        () =>
+          applyContentBatch(deps, {
+            sessionId,
+            ops: [{ op: 'create_scene', payload: { sessionId, name: 'Niveau1' } }],
+          }),
+        (error: unknown) => {
+          assert.ok(error instanceof McpError);
+          assert.match(error.message, /before any op ran/);
+          return true;
+        },
+      );
+    } finally {
+      deps.engine.serializeProject = realSerialize;
+    }
+    assert.equal(snap(deps, sessionId), before);
+    assert.equal(deps.store.get(sessionId).dirty, false);
+  });
+
+  it('étage gate post-apply : une NOUVELLE bloquante annule tout ; la baseline connue passe avec override', () => {
+    const deps = makeDeps();
+    const sessionId = makeSession(deps);
+    const before = snap(deps, sessionId);
+    const realList = deps.engine.listDiagnostics.bind(deps.engine);
+    const realCreateScene = deps.engine.createScene.bind(deps.engine);
+    let injected = false;
+    deps.engine.listDiagnostics = ((project: Parameters<typeof realList>[0]) => {
+      const base = realList(project);
+      return injected ? [...base, { type: 'UndeclaredVariable', message: 'Injected by the batch.' }] : base;
+    }) as typeof realList;
+    deps.engine.createScene = ((project: Parameters<typeof realCreateScene>[0], name: string): void => {
+      realCreateScene(project, name);
+      injected = true;
+    }) as typeof realCreateScene;
+    try {
+      // La 1re op injecte la bloquante : le gate post-apply doit tout annuler.
+      assert.throws(
+        () =>
+          applyContentBatch(deps, {
+            sessionId,
+            ops: [
+              { op: 'create_scene', payload: { sessionId, name: 'Niveau1' } },
+              { op: 'set_variable', payload: { sessionId, target: { scope: 'global' }, name: 'score', value: 1 } },
+            ],
+          }),
+        (error: unknown) => {
+          assert.ok(error instanceof McpError);
+          assert.match(error.message, /introduced blocking errors/);
+          return true;
+        },
+      );
+      assert.equal(snap(deps, sessionId), before);
+      assert.equal(deps.store.get(sessionId).dirty, false);
+      // Override explicite : la même panne passe quand allowInvalidBaseline:true.
+      const ok = applyContentBatch(deps, {
+        sessionId,
+        allowInvalidBaseline: true,
+        ops: [
+          { op: 'create_scene', payload: { sessionId, name: 'Niveau2' } },
+          { op: 'set_variable', payload: { sessionId, target: { scope: 'global' }, name: 'score', value: 2 } },
+        ],
+      });
+      assert.equal(ok.applied, 2);
+      assert.equal(deps.store.get(sessionId).dirty, true);
+    } finally {
+      deps.engine.listDiagnostics = realList;
+      deps.engine.createScene = realCreateScene;
+    }
+  });
+
+  it('étage updateBehaviorsSharedData : un échec après les ops restaure tout', () => {
+    const deps = makeDeps();
+    const sessionId = makeSession(deps);
+    const before = snap(deps, sessionId);
+    const realUpdate = deps.engine.updateBehaviorsSharedData.bind(deps.engine);
+    deps.engine.updateBehaviorsSharedData = (): void => {
+      throw new Error('injected shared-data failure');
+    };
+    try {
+      assert.throws(
+        () =>
+          applyContentBatch(deps, {
+            sessionId,
+            ops: [{ op: 'create_scene', payload: { sessionId, name: 'Niveau1' } }],
+          }),
+        (error: unknown) => error instanceof McpError && error.code === 'post-apply-failed',
+      );
+    } finally {
+      deps.engine.updateBehaviorsSharedData = realUpdate;
+    }
+    assert.equal(snap(deps, sessionId), before);
+    assert.equal(deps.store.get(sessionId).dirty, false);
+  });
+
+  it('étage disque en dryRun : fichier inchangé, aucun .bak- ni .pre-restore- créé', () => {
+    const deps = makeDeps();
+    const sessionId = makeSession(deps);
+    const dir = mkdtempSync(join(tmpdir(), 'gd-dry-save-'));
+    const file = join(dir, 'game.json');
+    saveProject(deps, { sessionId, path: file });
+    const beforeDisk = readFileSync(file, 'utf8');
+    const result = applyContentBatch(deps, {
+      sessionId,
+      dryRun: true,
+      ops: [{ op: 'create_scene', payload: { sessionId, name: 'Niveau1' } }],
+    });
+    assert.equal(result.dryRun, true);
+    assert.equal(readFileSync(file, 'utf8'), beforeDisk);
+    assert.deepEqual(listDir(dir), ['game.json']);
   });
 });

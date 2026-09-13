@@ -12,6 +12,25 @@ export interface CommandDeps {
 /** Lifecycle commands for empty projects through the real `gd.Project`. Thin
  *  wrappers over the session store; content mutations arrive in later tickets. */
 
+/**
+ * Écriture atomique tmp+rename partagée par save_project et undo_last_edit.
+ * En cas d'échec : le tmp est nettoyé (best effort) et l'erreur est codée io-error.
+ */
+function atomicWrite(target: string, contents: string, suffix: string, failureMessage: string): void {
+  const tmpPath = `${target}.tmp-${process.pid}-${randomUUID()}${suffix}`;
+  try {
+    writeFileSync(tmpPath, contents, 'utf8');
+    renameSync(tmpPath, target);
+  } catch (error) {
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      // Best effort: a leftover .tmp file is harmless but never a project.
+    }
+    throw new McpError('io-error', failureMessage, { cause: error });
+  }
+}
+
 export function createProject(deps: CommandDeps, args: { name?: string | undefined }): { sessionId: string; name: string } {
   const name = args.name ?? 'Untitled game';
   const session = deps.store.create(name);
@@ -66,21 +85,11 @@ export function saveProject(
       throw new McpError('io-error', `Cannot write backup at ${backupPath}. Nothing was written.`, { cause: error });
     }
   }
-  const tmpPath = `${target}.tmp-${process.pid}-${randomUUID()}`;
-  try {
-    writeFileSync(tmpPath, serialized, 'utf8');
-    renameSync(tmpPath, target);
-  } catch (error) {
-    try {
-      unlinkSync(tmpPath);
-    } catch {
-      // Best effort: a leftover .tmp file is harmless but never a project.
-    }
-    throw new McpError('io-error', `Atomic save to ${target} failed.`, { cause: error });
-  }
+  atomicWrite(target, serialized, '', `Atomic save to ${target} failed.`);
 
   // Copie -pre-restore : état disque pré-save pour undo_last_edit (one-shot).
   // Écrite après le save réussi ; un échec ici n'invalide pas le save.
+  // Rétention : même cycle que les .bak-<ISO> (une copie par save horodatée).
   let preRestorePath: string | null = null;
   if (backupPath !== null) {
     preRestorePath = `${target}.pre-restore-${new Date().toISOString().replace(/[:.]/g, '-')}`;
@@ -161,18 +170,7 @@ export function undoLastEdit(
       });
     }
   }
-  const tmpPath = `${target}.tmp-${process.pid}-${randomUUID()}-undo`;
-  try {
-    writeFileSync(tmpPath, preRestoreJson, 'utf8');
-    renameSync(tmpPath, target);
-  } catch (error) {
-    try {
-      unlinkSync(tmpPath);
-    } catch {
-      // Best effort.
-    }
-    throw new McpError('io-error', `Atomic undo restore to ${target} failed.`, { cause: error });
-  }
+  atomicWrite(target, preRestoreJson, '-undo', `Atomic undo restore to ${target} failed.`);
   try {
     deps.engine.restoreProject(session.project, preRestoreJson);
   } catch (error) {

@@ -87,9 +87,10 @@ booléens `"1"/"0"`), instances (`place/update/remove_instance` par id,
 `null`), groupes (`create/delete_group`, `add/remove_to/from_group`),
 ressources (`import/remove_resource`, binaire copié près du projet),
 batch (`apply_content_batch` : 31 ops contenu + événements mutantes en
-tout-ou-rien sous snapshot global, résumés + diff sémantique, `dryRun`,
-gate baseline sauf `allowInvalidBaseline:true`, compensation disque des
-binaires `import_resource`).
+tout-ou-rien sous snapshot global, résumés + diff sémantique, `dryRun`
+(résumés + diff sans mutation ni dirty), gate baseline sauf
+`allowInvalidBaseline:true`, compensation disque des binaires
+`import_resource`).
 
 Événements natifs (EN `snake_case`) : `append_scene_events` (arbre `kind`,
 validation L1+L2, JsCode marqueur seul), `move/remove/validate_scene_events`

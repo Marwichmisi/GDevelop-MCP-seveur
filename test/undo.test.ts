@@ -56,4 +56,22 @@ describe('undo_last_edit (ticket #17, spec US8)', () => {
     );
   });
 });
+describe('undo : gate baseline (ticket #17)', () => {
+  it('refuse de restaurer quand une bloquante survient entre save et undo, sans toucher au disque', () => {
+    const deps = makeDeps();
+    const sessionId = makeSession(deps);
+    const dir = mkdtempSync(join(tmpdir(), 'gd-undo-baseline-'));
+    const file = join(dir, 'game.json');
+    saveProject(deps, { sessionId, path: file });
+    const diskBefore = readFileSync(file, 'utf8');
+    // Une bloquante apparaît après le save : le gate mémoire de l undo refuse
+    // (validation-failed) avant toute écriture — ni fichier ni copie modifiés.
+    deps.engine.diagnostics.push({ type: 'UnknownObject', message: 'Casse apres save.' });
+    assert.throws(
+      () => undoLastEdit(deps, { sessionId }),
+      (error: unknown) => error instanceof McpError && error.code === 'validation-failed',
+    );
+    assert.equal(readFileSync(file, 'utf8'), diskBefore);
+  });
+});
 
