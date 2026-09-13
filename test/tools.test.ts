@@ -36,11 +36,11 @@ function contentHandler(
 }
 
 describe('project tools (command seam, never the transport)', () => {
-  it('exposes exactly the five lifecycle tools', () => {
+  it('exposes exactly the six lifecycle tools (ticket #17 adds undo_last_edit)', () => {
     const tools = createProjectTools(makeDeps());
     assert.deepEqual(
       tools.map((tool) => tool.name).sort(),
-      ['close_project', 'create_project', 'describe_project', 'open_project', 'save_project'],
+      ['close_project', 'create_project', 'describe_project', 'open_project', 'save_project', 'undo_last_edit'],
     );
   });
 
@@ -80,12 +80,12 @@ describe('project tools (command seam, never the transport)', () => {
     assert.ok(server);
   });
 
-  it('exposes the 28 content tools with the ticket payloads', () => {
+  it('exposes the 28 content tools + apply_content_batch with the ticket payloads', () => {
     const tools = createContentTools(makeDeps());
     assert.deepEqual(
       tools.map((tool) => tool.name).sort(),
       [
-        'add_object', 'add_to_group', 'attach_behavior', 'create_group', 'create_layer', 'create_scene',
+        'add_object', 'add_to_group', 'apply_content_batch', 'attach_behavior', 'create_group', 'create_layer', 'create_scene',
         'delete_group', 'delete_layer', 'delete_scene', 'import_resource', 'move_instances_to_layer',
         'move_layer', 'move_scene', 'place_instance', 'remove_behavior', 'remove_from_group', 'remove_instance',
         'remove_instances_of_object', 'remove_object', 'remove_resource', 'remove_variable', 'rename_layer',

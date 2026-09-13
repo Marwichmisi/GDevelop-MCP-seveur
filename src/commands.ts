@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { formatDiagnostics, isBlockingDiagnostic, type ContentView, type EnginePorts, type ProjectSummary } from './engine.js';
 import { McpError, validationFailed } from './errors.js';
@@ -40,7 +40,7 @@ export function describeProject(
 export function saveProject(
   deps: CommandDeps,
   args: { sessionId: string; path?: string | undefined },
-): { path: string; backupPath: string | null; bytes: number } {
+): { path: string; backupPath: string | null; preRestorePath: string | null; bytes: number } {
   const session = deps.store.get(args.sessionId);
   const rawTarget = args.path ?? session.filePath;
   if (!rawTarget) {
@@ -78,10 +78,24 @@ export function saveProject(
     }
     throw new McpError('io-error', `Atomic save to ${target} failed.`, { cause: error });
   }
+
+  // Copie -pre-restore : état disque pré-save pour undo_last_edit (one-shot).
+  // Écrite après le save réussi ; un échec ici n'invalide pas le save.
+  let preRestorePath: string | null = null;
+  if (backupPath !== null) {
+    preRestorePath = `${target}.pre-restore-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+    try {
+      copyFileSync(backupPath, preRestorePath);
+    } catch {
+      preRestorePath = null;
+    }
+  }
+
   deps.engine.setProjectFile(session.project, target);
   deps.store.setFilePath(session.id, target);
   deps.store.clearDirty(session.id);
-  return { path: target, backupPath, bytes: Buffer.byteLength(serialized, 'utf8') };
+  deps.store.setPreRestore(session.id, preRestorePath);
+  return { path: target, backupPath, preRestorePath, bytes: Buffer.byteLength(serialized, 'utf8') };
 }
 
 export function closeProject(
@@ -90,4 +104,80 @@ export function closeProject(
 ): { closed: true } {
   deps.store.close(args.sessionId, { force: args.force });
   return { closed: true };
+}
+
+/**
+ * undo_last_edit (spec US8) : restaure l'état pré-save (copie -pre-restore
+ * écrite au save) en mémoire ET sur disque, atomiquement (tmp+rename).
+ * One-shot : la copie est consommée ; un 2e undo refuse proprement.
+ * L'état restauré redevient dirty=false (il converge avec le disque).
+ */
+export function undoLastEdit(
+  deps: CommandDeps,
+  args: { sessionId: string },
+): { restoredPath: string; preRestorePath: string; backupPath: string } {
+  const session = deps.store.get(args.sessionId);
+  const target = session.filePath;
+  if (!target) {
+    throw validationFailed('No project file: save the session once before undoing.');
+  }
+  const preRestorePath = deps.store.consumePreRestore(session.id);
+  let preRestoreJson: string;
+  try {
+    preRestoreJson = readFileSync(preRestorePath, 'utf8');
+  } catch (error) {
+    throw new McpError('io-error', `Cannot read pre-restore copy at ${preRestorePath}.`, { cause: error });
+  }
+  // Gate mémoire : refuser plutôt que charger un état bloquant.
+  let staged;
+  try {
+    staged = deps.engine.loadProjectFromJson(preRestoreJson, target);
+  } catch (error) {
+    throw new McpError('project-load-failed', `Pre-restore copy at ${preRestorePath} could not be loaded.`, {
+      cause: error,
+    });
+  }
+  const blocking = deps.engine.listDiagnostics(staged).filter(isBlockingDiagnostic);
+  if (blocking.length > 0) {
+    try {
+      staged.delete();
+    } catch {
+      // Best effort.
+    }
+    throw validationFailed(
+      `Refusing undo: pre-restore state has blocking errors (${formatDiagnostics(blocking)}).`,
+    );
+  }
+  staged.delete();
+  // Disque d'abord (tmp+rename), avec backup de sécurité, puis mémoire.
+  let undoBackupPath: string | null = null;
+  if (existsSync(target)) {
+    undoBackupPath = `${target}.bak-${new Date().toISOString().replace(/[:.]/g, '-')}-undo`;
+    try {
+      copyFileSync(target, undoBackupPath);
+    } catch (error) {
+      throw new McpError('io-error', `Cannot write undo backup at ${undoBackupPath}. Nothing was restored.`, {
+        cause: error,
+      });
+    }
+  }
+  const tmpPath = `${target}.tmp-${process.pid}-${randomUUID()}-undo`;
+  try {
+    writeFileSync(tmpPath, preRestoreJson, 'utf8');
+    renameSync(tmpPath, target);
+  } catch (error) {
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      // Best effort.
+    }
+    throw new McpError('io-error', `Atomic undo restore to ${target} failed.`, { cause: error });
+  }
+  try {
+    deps.engine.restoreProject(session.project, preRestoreJson);
+  } catch (error) {
+    throw new McpError('post-apply-failed', 'Undo wrote the disk copy but memory restore failed.', { cause: error });
+  }
+  deps.store.clearDirty(session.id);
+  return { restoredPath: target, preRestorePath, backupPath: undoBackupPath ?? preRestorePath };
 }

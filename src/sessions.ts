@@ -10,6 +10,8 @@ export interface Session {
   project: EngineProject;
   filePath: string | null;
   dirty: boolean;
+  /** Copie disque `-pre-restore` (état pré-save) pour undo_last_edit one-shot. */
+  preRestorePath: string | null;
 }
 
 export interface ProjectStoreOptions {
@@ -31,7 +33,7 @@ export class ProjectStore {
 
   create(name: string): Session {
     const project = this.engine.createProject(name);
-    const session: Session = { id: randomUUID(), project, filePath: null, dirty: false };
+    const session: Session = { id: randomUUID(), project, filePath: null, dirty: false, preRestorePath: null };
     this.sessions.set(session.id, session);
     return session;
   }
@@ -56,7 +58,7 @@ export class ProjectStore {
       throw new McpError('io-error', `Cannot read project file at ${absolute}.`, { cause: error });
     }
     const project = this.engine.loadProjectFromJson(json, absolute);
-    const session: Session = { id: randomUUID(), project, filePath: absolute, dirty: false };
+    const session: Session = { id: randomUUID(), project, filePath: absolute, dirty: false, preRestorePath: null };
     this.sessions.set(session.id, session);
     return session;
   }
@@ -81,6 +83,23 @@ export class ProjectStore {
 
   clearDirty(id: string): void {
     this.get(id).dirty = false;
+  }
+
+  setPreRestore(id: string, path: string | null): void {
+    this.get(id).preRestorePath = path;
+  }
+
+  consumePreRestore(id: string): string {
+    const session = this.get(id);
+    const path = session.preRestorePath;
+    if (!path) {
+      throw new McpError(
+        'validation-failed',
+        `No undo available for session ${id}: save the session first, then undo once per save.`,
+      );
+    }
+    session.preRestorePath = null;
+    return path;
   }
 
   close(id: string, options: { force?: boolean | undefined } = {}): void {

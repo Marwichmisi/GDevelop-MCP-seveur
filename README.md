@@ -72,10 +72,11 @@ démarrage). Exemple de premier prompt : « Crée un projet GDevelop nommé
 ## Outils
 
 Lifecycle : `create_project`, `open_project`, `describe_project`,
-`save_project`, `close_project` (`describe_project` expose aussi `content` :
+`save_project` (backup timestampé + copie `-pre-restore`), `close_project`,
+`undo_last_edit` (restauration pré-save mémoire + disque, one-shot par save) (`describe_project` expose aussi `content` :
 scènes, objets, instances, variables, groupes, ressources).
 
-Contenu (EN `snake_case`, même payloads qu'en batch à venir) : scènes
+Contenu (EN `snake_case`, mêmes payloads qu'en batch `apply_content_batch`) : scènes
 (`create/rename/move/delete_scene`), layers (`create/rename/move/delete_layer`,
 calque de base `""` protégé), objets (`add/rename/remove_object`, behaviors
 inline, variables, `collisionMaskAutomatic` Sprite), behaviors
@@ -84,7 +85,11 @@ booléens `"1"/"0"`), instances (`place/update/remove_instance` par id,
 `remove_instances_of_object`, `move_instances_to_layer`), variables libres
 (`set/remove/rename_variable`, scopes global/scene/object/instance, pas de
 `null`), groupes (`create/delete_group`, `add/remove_to/from_group`),
-ressources (`import/remove_resource`, binaire copié près du projet).
+ressources (`import/remove_resource`, binaire copié près du projet),
+batch (`apply_content_batch` : 31 ops contenu + événements mutantes en
+tout-ou-rien sous snapshot global, résumés + diff sémantique, `dryRun`,
+gate baseline sauf `allowInvalidBaseline:true`, compensation disque des
+binaires `import_resource`).
 
 Événements natifs (EN `snake_case`) : `append_scene_events` (arbre `kind`,
 validation L1+L2, JsCode marqueur seul), `move/remove/validate_scene_events`

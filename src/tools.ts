@@ -1,6 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { closeProject, createProject, describeProject, openProject, saveProject, type CommandDeps } from './commands.js';
+import { closeProject, createProject, describeProject, openProject, saveProject, undoLastEdit, type CommandDeps } from './commands.js';
 import {
   addObject,
   addToGroup,
@@ -39,6 +39,7 @@ import {
   removeSceneEvent,
   validateSceneEvents,
 } from './events.js';
+import { applyContentBatch, batchSchema } from './batch.js';
 import {
   catalogSchemas,
   catalogStatus,
@@ -105,6 +106,13 @@ export function createProjectTools(deps: CommandDeps): ToolDefinition[] {
       },
       handler: async (args) =>
         text(closeProject(deps, { sessionId: args['sessionId'] as string, force: args['force'] as boolean | undefined })),
+    },
+    {
+      name: 'undo_last_edit',
+      description:
+        'Restore the pre-save state (memory + disk, atomic tmp+rename) from the -pre-restore copy written at save. One-shot per save.',
+      inputSchema: { sessionId: z.string().uuid().describe('Session UUID') },
+      handler: async (args) => text(undoLastEdit(deps, { sessionId: args['sessionId'] as string })),
     },
   ];
 }
@@ -202,6 +210,13 @@ export function createContentTools(deps: CommandDeps): ToolDefinition[] {
       deps,
     ),
     contentTool('remove_resource', 'Unregister a resource (the file stays on disk).', 'removeResource', removeResource, deps),
+    {
+      name: 'apply_content_batch',
+      description:
+        'Replay granular content+event payloads all-or-nothing (snapshot global + gate baseline + dryRun + semantic diff). Per-op dryRun is forbidden.',
+      inputSchema: batchSchema.shape,
+      handler: async (args) => text(applyContentBatch(deps, args)),
+    },
   ];
 }
 
