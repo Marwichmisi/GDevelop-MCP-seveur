@@ -100,12 +100,14 @@ const eventNodeSchema: z.ZodType<EventNodeInput> = z.lazy(() =>
   ]),
 );
 
-const eventSelectorSchema = z
-  .union([
-    z.object({ path: z.array(z.number().int().nonnegative()).describe('Immediate index path, e.g. [0, 2]') }),
-    z.object({ id: z.string().min(1).describe('Stable stamped event id') }),
-  ])
-  .describe('Event selector: {path} immediate or {id} stable');
+function makeEventSelectorSchema(): z.ZodTypeAny {
+  return z
+    .union([
+      z.object({ path: z.array(z.number().int().nonnegative()).describe('Immediate index path, e.g. [0, 2]') }),
+      z.object({ id: z.string().min(1).describe('Stable stamped event id') }),
+    ])
+    .describe('Event selector: {path} immediate or {id} stable');
+}
 
 export const eventsSchemas = {
   appendSceneEvents: z.object({
@@ -118,15 +120,15 @@ export const eventsSchemas = {
   moveSceneEvent: z.object({
     sessionId,
     scene: sceneName,
-    from: eventSelectorSchema,
+    from: makeEventSelectorSchema(),
     toPosition: z.number().int().describe('Destination position in the destination parent list'),
-    toParent: eventSelectorSchema.optional().describe('Destination parent (absent = same parent as source)'),
+    toParent: makeEventSelectorSchema().optional().describe('Destination parent (absent = same parent as source)'),
     dryRun: z.boolean().optional(),
   }),
   removeSceneEvent: z.object({
     sessionId,
     scene: sceneName,
-    target: eventSelectorSchema,
+    target: makeEventSelectorSchema(),
     dryRun: z.boolean().optional(),
   }),
   validateSceneEvents: z.object({

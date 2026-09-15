@@ -66,6 +66,24 @@ function text(payload: unknown): { content: { type: 'text'; text: string }[] } {
   return { content: [{ type: 'text', text: JSON.stringify(payload) }] };
 }
 
+/**
+ * Exposed MCP schemas must stay non-recursive: most providers reject
+ * recursive JSON Schemas entirely (one bad tool breaks every request).
+ * Internal validation still uses the full recursive `contentSchemas` /
+ * `eventsSchemas`; what follows is only the LLM-facing shape.
+ */
+const freeJsonValue = z.unknown().describe('Free JSON value (string, number, boolean, null, array, object; validated server-side)');
+const freeVariables = z
+  .record(freeJsonValue)
+  .optional()
+  .describe('Variables as free JSON (objects, arrays, primitives; validated server-side)');
+const exposedEventTree = z
+  .array(z.unknown())
+  .min(1)
+  .describe(
+    'Event tree: array of {kind,...} nodes (standard, else, repeat, while, foreach, foreachChildVariable, group, comment, link, jscode with gdevelop-mcp:scene-script marker). Sub-events nest under `events`. Fully validated server-side (L1+L2).',
+  );
+
 /** Tool = thin zod wrapper over the headless command layer. */
 export function createProjectTools(deps: CommandDeps): ToolDefinition[] {
   return [
@@ -131,11 +149,12 @@ function contentTool<K extends keyof typeof contentSchemas>(
   schemaKey: K,
   command: (deps: CommandDeps, args: unknown) => unknown,
   deps: CommandDeps,
+  exposedOverride?: Record<string, z.ZodTypeAny>,
 ): ToolDefinition {
   return {
     name,
     description,
-    inputSchema: contentSchemas[schemaKey].shape,
+    inputSchema: { ...contentSchemas[schemaKey].shape, ...exposedOverride },
     handler: async (args) => text(command(deps, args)),
   };
 }
@@ -146,11 +165,12 @@ function eventTool<K extends keyof typeof eventsSchemas>(
   schemaKey: K,
   command: (deps: CommandDeps, args: unknown) => unknown,
   deps: CommandDeps,
+  exposedOverride?: Record<string, z.ZodTypeAny>,
 ): ToolDefinition {
   return {
     name,
     description,
-    inputSchema: eventsSchemas[schemaKey].shape,
+    inputSchema: { ...eventsSchemas[schemaKey].shape, ...exposedOverride },
     handler: async (args) => text(command(deps, args)),
   };
 }
@@ -172,14 +192,19 @@ export function createContentTools(deps: CommandDeps): ToolDefinition[] {
       'addObject',
       addObject,
       deps,
+      { variables: freeVariables },
     ),
     contentTool('rename_object', 'Rename an object (instances and groups follow).', 'renameObject', renameObject, deps),
     contentTool('remove_object', 'Delete an object and purge its instances and group memberships.', 'removeObject', removeObject, deps),
     contentTool('attach_behavior', 'Attach a behavior to an object.', 'attachBehavior', attachBehavior, deps),
     contentTool('update_behavior', 'Update behavior properties (names are case-insensitive).', 'updateBehavior', updateBehavior, deps),
     contentTool('remove_behavior', 'Remove a behavior from an object.', 'removeBehavior', removeBehavior, deps),
-    contentTool('place_instance', 'Place an object instance in a scene; returns its instance id.', 'placeInstance', placeInstance, deps),
-    contentTool('update_instance', 'Patch an instance by id (position, layer, size, variables…).', 'updateInstance', updateInstance, deps),
+    contentTool('place_instance', 'Place an object instance in a scene; returns its instance id.', 'placeInstance', placeInstance, deps, {
+      variables: freeVariables,
+    }),
+    contentTool('update_instance', 'Patch an instance by id (position, layer, size, variables…).', 'updateInstance', updateInstance, deps, {
+      variables: freeVariables,
+    }),
     contentTool('remove_instance', 'Remove a single instance by id.', 'removeInstance', removeInstance, deps),
     contentTool(
       'remove_instances_of_object',
@@ -195,7 +220,9 @@ export function createContentTools(deps: CommandDeps): ToolDefinition[] {
       moveInstancesToLayer,
       deps,
     ),
-    contentTool('set_variable', 'Set a free-JSON variable in any scope (global, scene, object, instance).', 'setVariable', setVariable, deps),
+    contentTool('set_variable', 'Set a free-JSON variable in any scope (global, scene, object, instance).', 'setVariable', setVariable, deps, {
+      value: freeJsonValue,
+    }),
     contentTool('remove_variable', 'Remove a variable in any scope.', 'removeVariable', removeVariable, deps),
     contentTool('rename_variable', 'Rename a variable in any scope.', 'renameVariable', renameVariable, deps),
     contentTool('create_group', 'Create an object group with optional members.', 'createGroup', createGroup, deps),
@@ -229,6 +256,7 @@ export function createEventTools(deps: CommandDeps): ToolDefinition[] {
       'appendSceneEvents',
       appendSceneEvents,
       deps,
+      { events: exposedEventTree },
     ),
     eventTool(
       'move_scene_event',
@@ -250,6 +278,7 @@ export function createEventTools(deps: CommandDeps): ToolDefinition[] {
       'validateSceneEvents',
       validateSceneEvents,
       deps,
+      { events: exposedEventTree },
     ),
   ];
 }
