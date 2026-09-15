@@ -124,14 +124,21 @@ export async function closeProjectWithPreviews(
   deps: CommandDeps,
   args: { sessionId: string; force?: boolean | undefined },
 ): Promise<{ closed: true; stoppedPreviews: number }> {
+  // Dirty gate first (same rule as ProjectStore.close, the canonical owner):
+  // a refusal must have no side effects, so linked previews keep running.
+  const session = deps.store.get(args.sessionId);
+  if (session.dirty && args.force !== true) {
+    throw new McpError(
+      'session-dirty',
+      `Session ${args.sessionId} has unsaved changes. Save it first or close with force:true to discard them.`,
+    );
+  }
+  let stopped = 0;
   if (deps.previews) {
-    const result = (await deps.previews.stopForSession(args.sessionId)) as { stopped: number };
-    const stopped = typeof result?.stopped === 'number' ? result.stopped : 0;
-    deps.store.close(args.sessionId, { force: args.force });
-    return { closed: true, stoppedPreviews: stopped };
+    stopped = ((await deps.previews.stopForSession(args.sessionId)) as { stopped: number }).stopped ?? 0;
   }
   deps.store.close(args.sessionId, { force: args.force });
-  return { closed: true, stoppedPreviews: 0 };
+  return { closed: true, stoppedPreviews: stopped };
 }
 
 /**

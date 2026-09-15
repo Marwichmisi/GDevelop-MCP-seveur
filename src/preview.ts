@@ -5,9 +5,13 @@ import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
 import { z } from 'zod';
 import type { CommandDeps } from './commands.js';
-import type { ContentView, EngineProject } from './engine.js';
-import { McpError, validationFailed } from './errors.js';
+import type { EngineProject } from './engine.js';
+import { McpError } from './errors.js';
+import { renderSceneStaticView, resolveSceneName } from './previewStatic.js';
+import type { StaticRenderResult } from './previewStatic.js';
 import { startStaticPreviewServer, type StaticPreviewServer } from './previewServer.js';
+
+export type { StaticRenderResult } from './previewStatic.js';
 
 /**
  * Preview double mode (issue #16): `render_scene_static` (instant, pure
@@ -50,16 +54,12 @@ export const previewSchemas = {
 export type RenderSceneStaticInput = z.infer<typeof previewSchemas.renderSceneStatic>;
 export type BuildPreviewInput = z.infer<typeof previewSchemas.buildPreview>;
 
-export interface StaticRenderResult {
-  sessionId: string;
-  scene: string;
+export interface PreviewCaptureOptions {
   width: number;
   height: number;
-  objectCount: number;
-  instanceCount: number;
-  layers: string[];
-  /** Minimal inline SVG thumbnail (pure, no engine, no browser). */
-  svg: string;
+  durationMs: number;
+  withScreenshot: boolean;
+  outDir: string;
 }
 
 export interface PreviewRecord {
@@ -85,54 +85,18 @@ export interface PreviewExporter {
 export interface PreviewBrowser {
   capture(
     url: string,
-    options: { width: number; height: number; durationMs: number; withScreenshot: boolean; outDir: string },
+    options: PreviewCaptureOptions,
   ): Promise<{ logs: string[]; pageErrors: string[]; screenshotPath: string | null }>;
 }
 
-function escapeXml(value: string): string {
-  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
-
-/** Pure static render over the content view: no engine, no browser, <1s. */
-export function renderSceneStaticView(
-  sessionId: string,
-  view: ContentView,
-  options: { scene?: string | undefined; width: number; height: number },
-): StaticRenderResult {
-  if (view.scenes.length === 0) {
-    throw validationFailed('No scenes in this project: create one with create_scene first.');
-  }
-  const target = options.scene ?? view.scenes[0]?.name;
-  const scene = view.scenes.find((candidate) => candidate.name === target);
-  if (!scene || target === undefined) {
-    const known = view.scenes.map((candidate) => candidate.name).join(', ');
-    throw validationFailed(`Unknown scene "${options.scene}". Known scenes: ${known}.`);
-  }
-  const dots = scene.instances
-    .slice(0, 500)
-    .map((instance, index) => {
-      const cx = ((instance.x % options.width) + options.width) % options.width;
-      const cy = ((instance.y % options.height) + options.height) % options.height;
-      const hue = (index * 47) % 360;
-      return `<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="5" fill="hsl(${hue},70%,55%)"><title>${escapeXml(instance.object)}</title></circle>`;
-    })
-    .join('');
-  const svg =
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${options.width}" height="${options.height}" viewBox="0 0 ${options.width} ${options.height}">` +
-    `<rect width="100%" height="100%" fill="#101828"/>` +
-    `<text x="12" y="24" fill="#fff" font-size="14">${escapeXml(scene.name)} (${scene.instances.length})</text>` +
-    dots +
-    `</svg>`;
-  return {
-    sessionId,
-    scene: scene.name,
-    width: options.width,
-    height: options.height,
-    objectCount: scene.objects.length,
-    instanceCount: scene.instances.length,
-    layers: [...scene.layers],
-    svg,
-  };
+/**
+ * Draco fix (research §6.2): some libGD/GDJS artifact combos list the raw
+ * Draco wasm binary as a `<script>` include — it must load via DRACOLoader,
+ * never parsed as JS. Shared by the stub and the real exporter.
+ */
+export function sanitizeDracoScriptIncludes(html: string): { html: string; sanitized: boolean } {
+  const cleaned = html.replace(/<script[^>]*draco[^>]*\.wasm[^>]*>\s*<\/script>\s*/gi, '');
+  return { html: cleaned, sanitized: cleaned !== html };
 }
 
 /**
@@ -150,18 +114,23 @@ export class StubPreviewExporter implements PreviewExporter {
     const raw = [
       '<!doctype html><html><head><meta charset="utf-8"></head><body>',
       '<script src="draco_decoder.wasm.js"></script>',
-      `<div id="scene">${escapeXml(sceneName)}</div>`,
+      `<div id="scene">${sceneName.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</div>`,
       '<script>window.gdjsPreview = true;</script>',
       '</body></html>',
     ].join('\n');
-    const sanitized = raw.replace(/<script[^>]*draco[^>]*\.wasm[^>]*>\s*<\/script>\s*/gi, '');
-    await writeFile(join(outDir, 'index.html'), sanitized, 'utf8');
-    return { sanitizedDraco: sanitized !== raw };
+    const { html, sanitized } = sanitizeDracoScriptIncludes(raw);
+    await writeFile(join(outDir, 'index.html'), html, 'utf8');
+    return { sanitizedDraco: sanitized };
   }
 }
 
-/** No-browser default: fast path, logs always returned (empty), no screenshot. */
-export class NoBrowserPreview implements PreviewBrowser {
+/**
+ * Null-object browser: the fast log-only path. GDJS console logs require a
+ * real page run, so without a browser only export lines are reported (see
+ * `buildInner`); use `withScreenshot:true` (or an injected browser) for the
+ * full console capture.
+ */
+export class NullPreviewBrowser implements PreviewBrowser {
   async capture(): Promise<{ logs: string[]; pageErrors: string[]; screenshotPath: string | null }> {
     return { logs: [], pageErrors: [], screenshotPath: null };
   }
@@ -197,7 +166,7 @@ export class PreviewManager {
     this.tmpRoot = options.tmpRoot ?? tmpdir();
     this.ttlMs = options.ttlMs ?? PREVIEW_TTL_MS;
     this.exporter = options.exporter ?? new StubPreviewExporter();
-    this.browser = options.browser ?? new NoBrowserPreview();
+    this.browser = options.browser ?? new NullPreviewBrowser();
     this.startServer = options.startServer ?? startStaticPreviewServer;
   }
 
@@ -224,11 +193,14 @@ export class PreviewManager {
       if (!found || found.status === 'stopped') {
         throw new McpError('preview-not-found', `Unknown preview: ${parsed.previewId}.`);
       }
-      return this.describe(found);
+      // Reading a preview proves it is still wanted: slide the TTL window.
+      this.refreshTtl(found);
+      return this.toRecord(found);
     }
     const newest = [...this.previews.values()].filter((candidate) => candidate.status !== 'stopped').pop();
     if (!newest) throw new McpError('preview-not-found', 'No active previews.');
-    return this.describe(newest);
+    this.refreshTtl(newest);
+    return this.toRecord(newest);
   }
 
   async stop(previewId: string): Promise<{ stopped: true; previewId: string }> {
@@ -261,21 +233,7 @@ export class PreviewManager {
 
   private resolveScene(sessionId: string, wanted?: string): string {
     const session = this.deps.store.get(sessionId);
-    const view = this.deps.engine.describeContent(session.project);
-    if (view.scenes.length === 0) {
-      throw validationFailed('No scenes in this project: create one with create_scene first.');
-    }
-    if (wanted === undefined) {
-      const first = view.scenes[0]?.name;
-      if (first === undefined) throw validationFailed('No scenes in this project.');
-      return first;
-    }
-    const found = view.scenes.some((scene) => scene.name === wanted);
-    if (!found) {
-      const known = view.scenes.map((scene) => scene.name).join(', ');
-      throw validationFailed(`Unknown scene "${wanted}". Known scenes: ${known}.`);
-    }
-    return wanted;
+    return resolveSceneName(this.deps.engine.describeContent(session.project), wanted);
   }
 
   private async buildInner(parsed: BuildPreviewInput): Promise<PreviewRecord> {
@@ -288,18 +246,39 @@ export class PreviewManager {
       (candidate) =>
         candidate.status !== 'stopped' && candidate.sessionId === parsed.sessionId && candidate.scene === scene && candidate.dirtyHash === hash,
     );
-    if (existing && parsed.withScreenshot === false && existing.screenshotPath === null) {
-      existing.reused = true;
-      this.refreshTtl(existing);
-      this.assertUntouched(session.filePath, beforeMtime);
-      return this.describe(existing);
+    if (existing) {
+      if (!parsed.withScreenshot) {
+        existing.reused = true;
+        this.refreshTtl(existing);
+        this.assertUntouched(session.filePath, beforeMtime);
+        return this.toRecord(existing);
+      }
+      // Same project hash, screenshot now requested: capture into the live
+      // export instead of a second one (no leaked server or temp dir).
+      if (existing.server) {
+        const effectiveBrowser = await this.resolveBrowser(true);
+        const captured = await effectiveBrowser.capture(existing.url, {
+          width: parsed.width,
+          height: parsed.height,
+          durationMs: parsed.durationMs,
+          withScreenshot: true,
+          outDir: existing.outDir,
+        });
+        existing.logs = [...existing.logs, ...captured.logs].slice(-PREVIEW_LOG_CAP);
+        existing.pageErrors = [...existing.pageErrors, ...captured.pageErrors].slice(-PREVIEW_LOG_CAP);
+        existing.screenshotPath = captured.screenshotPath;
+        existing.reused = true;
+        this.refreshTtl(existing);
+        this.assertUntouched(session.filePath, beforeMtime);
+        return this.toRecord(existing);
+      }
     }
 
     const outDir = await mkdtemp(join(this.tmpRoot + sep, 'preview-'));
     const previewId = randomUUID();
     let server: StaticPreviewServer | null = null;
     try {
-      await this.exporter.exportProject(session.project, outDir, scene);
+      const { sanitizedDraco } = await this.exporter.exportProject(session.project, outDir, scene);
       server = await this.startServer({ rootDirectory: outDir, host: '127.0.0.1' });
       const effectiveBrowser = await this.resolveBrowser(parsed.withScreenshot);
       const captured = await effectiveBrowser.capture(server.url, {
@@ -309,6 +288,12 @@ export class PreviewManager {
         withScreenshot: parsed.withScreenshot,
         outDir,
       });
+      // The fast path runs no page, so GDJS console entries only exist after
+      // a browser capture; export lines keep `logs` always informative.
+      const exportLines = [
+        `[export] scene "${scene}" exported`,
+        ...(sanitizedDraco ? ['[export] draco wasm companion removed from index.html'] : []),
+      ];
       const record: ManagedPreview = {
         previewId,
         sessionId: parsed.sessionId,
@@ -317,7 +302,7 @@ export class PreviewManager {
         outDir,
         dirtyHash: hash,
         reused: false,
-        logs: captured.logs.slice(-PREVIEW_LOG_CAP),
+        logs: [...exportLines, ...captured.logs].slice(-PREVIEW_LOG_CAP),
         pageErrors: captured.pageErrors.slice(-PREVIEW_LOG_CAP),
         screenshotPath: captured.screenshotPath,
         createdAt: new Date().toISOString(),
@@ -328,7 +313,7 @@ export class PreviewManager {
       this.previews.set(previewId, record);
       this.refreshTtl(record);
       this.assertUntouched(session.filePath, beforeMtime);
-      return this.describe(record);
+      return this.toRecord(record);
     } catch (error) {
       if (server) await server.close().catch(() => undefined);
       await rm(outDir, { recursive: true, force: true }).catch(() => undefined);
@@ -340,7 +325,7 @@ export class PreviewManager {
   }
 
   private async resolveBrowser(withScreenshot: boolean): Promise<PreviewBrowser> {
-    if (withScreenshot && this.browser instanceof NoBrowserPreview) {
+    if (withScreenshot && this.browser instanceof NullPreviewBrowser) {
       const { PuppeteerBrowser } = await import('./previewBrowser.js');
       return new PuppeteerBrowser();
     }
@@ -370,7 +355,7 @@ export class PreviewManager {
     await rm(record.outDir, { recursive: true, force: true }).catch(() => undefined);
   }
 
-  private describe(record: ManagedPreview): PreviewRecord {
+  private toRecord(record: ManagedPreview): PreviewRecord {
     return {
       previewId: record.previewId,
       sessionId: record.sessionId,

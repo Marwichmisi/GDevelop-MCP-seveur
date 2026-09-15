@@ -152,7 +152,7 @@ export function createProjectTools(deps: CommandDeps): ToolDefinition[] {
 export function registerProjectTools(server: McpServer, deps: CommandDeps, catalog?: Catalog): void {
   const tools = [...createProjectTools(deps), ...createContentTools(deps), ...createEventTools(deps)];
   if (catalog) tools.push(...createCatalogTools(catalog));
-  if (deps.previews) tools.push(...createPreviewTools(deps.previews as unknown as PreviewManagerLike));
+  if (deps.previews) tools.push(...createPreviewTools(deps.previews as unknown as PreviewPorts));
   for (const tool of tools) {
     server.registerTool(
       tool.name,
@@ -398,7 +398,7 @@ export function createCatalogTools(catalog: Catalog): ToolDefinition[] {
 }
 
 /** Minimal structural seam for the preview manager (avoids a tools↔preview import cycle). */
-export interface PreviewManagerLike {
+export interface PreviewPorts {
   renderStatic(input: unknown): StaticRenderResult;
   build(input: unknown): Promise<PreviewRecord>;
   status(previewId?: string | undefined): PreviewRecord;
@@ -410,7 +410,7 @@ export interface PreviewManagerLike {
  * enforced at call time via `previewSchemas` parse); annotations follow the
  * mcp-builder checklist so clients can reason about side effects.
  */
-export function createPreviewTools(previews: PreviewManagerLike): ToolDefinition[] {
+export function createPreviewTools(previews: PreviewPorts): ToolDefinition[] {
   return [
     {
       name: 'render_scene_static',
@@ -425,7 +425,7 @@ export function createPreviewTools(previews: PreviewManagerLike): ToolDefinition
       name: 'build_preview',
       title: 'Build playable preview',
       description:
-        'Build a playable GDJS preview from the live memory session (no save, project file untouched) and serve it on 127.0.0.1 with logs. Rebuilds only when dirty (sha256); screenshot is opt-in and slow.',
+        'Build a playable GDJS preview from the live memory session (no save, project file untouched) and serve it on 127.0.0.1. Rebuilds only when dirty (sha256); same-hash builds reuse the live export. Logs always carry export lines; GDJS console entries appear after a browser capture (withScreenshot). Screenshot is opt-in and slow.',
       inputSchema: previewSchemas.buildPreview.shape,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       handler: async (args) => text(await previews.build(args)),

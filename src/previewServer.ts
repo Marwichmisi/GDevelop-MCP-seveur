@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { createReadStream, promises as fsPromises, statSync } from 'node:fs';
+import { createReadStream, statSync } from 'node:fs';
 import { extname, resolve, sep } from 'node:path';
 
 /**
@@ -124,13 +124,4 @@ async function serveFile(req: IncomingMessage, res: ServerResponse, resolvedRoot
     res.end();
   });
   stream.pipe(res);
-}
-
-export async function pathExists(filePath: string): Promise<boolean> {
-  try {
-    await fsPromises.stat(filePath);
-    return true;
-  } catch {
-    return false;
-  }
 }

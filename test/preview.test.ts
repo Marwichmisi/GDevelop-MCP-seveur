@@ -4,8 +4,9 @@ import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ProjectStore } from '../src/sessions.js';
-import { PreviewManager, PREVIEW_LOG_CAP, type PreviewBrowser, type PreviewExporter } from '../src/preview.js';
+import { PreviewManager, PREVIEW_LOG_CAP, sanitizeDracoScriptIncludes, type PreviewBrowser, type PreviewExporter } from '../src/preview.js';
 import { createPreviewTools } from '../src/tools.js';
+import { closeProjectWithPreviews } from '../src/commands.js';
 import { createFakeEngine } from './fakeEngine.js';
 import type { EngineProject } from '../src/engine.js';
 
@@ -21,9 +22,9 @@ class CountingExporter implements PreviewExporter {
     this.calls += 1;
     const { writeFile } = await import('node:fs/promises');
     const raw = `<html><head><script src="draco_decoder.wasm.js"></script></head><body>${sceneName}</body></html>`;
-    const sanitized = raw.replace(/<script[^>]*draco[^>]*\.wasm[^>]*>\s*<\/script>\s*/gi, '');
-    await writeFile(join(outDir, 'index.html'), sanitized, 'utf8');
-    return { sanitizedDraco: sanitized !== raw };
+    const { html, sanitized } = sanitizeDracoScriptIncludes(raw);
+    await writeFile(join(outDir, 'index.html'), html, 'utf8');
+    return { sanitizedDraco: sanitized };
   }
 }
 
@@ -105,7 +106,12 @@ describe('preview double mode (issue #16)', () => {
     const sessionId = createSession(deps);
     const record = await manager.build({ sessionId, withScreenshot: false, width: 800, height: 600, durationMs: 0 });
     assert.match(record.url, /^http:\/\/127\.0\.0\.1:\d+\/$/);
-    assert.deepEqual(record.logs, ['[log] booted']);
+    // Export lines are always present; GDJS console entries need a browser run.
+    assert.deepEqual(record.logs, [
+      '[export] scene "Scene1" exported',
+      '[export] draco wasm companion removed from index.html',
+      '[log] booted',
+    ]);
     assert.equal(record.screenshotPath, null);
     const response = await fetch(record.url);
     assert.equal(response.status, 200);
@@ -157,14 +163,46 @@ describe('preview double mode (issue #16)', () => {
     assert.ok(statSync(record.screenshotPath as string).size > 0);
   });
 
+  it('screenshot on a live export reuses it instead of a second export', async () => {
+    const { manager, exporter, deps } = makeManager();
+    const sessionId = createSession(deps);
+    const fast = await manager.build({ sessionId, withScreenshot: false, width: 800, height: 600, durationMs: 0 });
+    assert.equal(fast.screenshotPath, null);
+    const shot = await manager.build({ sessionId, withScreenshot: true, width: 800, height: 600, durationMs: 0 });
+    assert.equal(exporter.calls, 1);
+    assert.equal(shot.previewId, fast.previewId);
+    assert.equal(shot.outDir, fast.outDir);
+    assert.equal(shot.reused, true);
+    assert.ok(shot.screenshotPath);
+    assert.ok(shot.logs.some((line) => line.startsWith('[export]')));
+    assert.ok(shot.logs.includes('[log] booted'));
+  });
+
+  it('static render clips out-of-bounds instances and reports skipped dots', () => {
+    const { manager, deps } = makeManager();
+    const sessionId = createSession(deps);
+    const project = deps.store.get(sessionId).project;
+    deps.engine.createObject(project, { scene: 'Scene1', type: 'Sprite', name: 'Hero' });
+    deps.engine.placeInstance(project, { scene: 'Scene1', object: 'Hero', x: 5000, y: 20 });
+    const rendered = manager.renderStatic({ sessionId, width: 800, height: 600 });
+    assert.match(rendered.svg, /cx="5000\.0"/);
+    assert.equal(rendered.skipped, 0);
+    for (let i = 0; i < 505; i++) {
+      deps.engine.placeInstance(project, { scene: 'Scene1', object: 'Hero', x: i, y: i });
+    }
+    const crowded = manager.renderStatic({ sessionId, width: 800, height: 600 });
+    assert.equal(crowded.instanceCount, 506);
+    assert.equal(crowded.skipped, 6);
+  });
+
   it('screenshot without a browser refuses cleanly', async () => {
     const deps = makeDeps();
     const dir = mkdtempSync(join(tmpdir(), 'gd-preview-'));
     dirs.push(dir);
     const session = deps.store.create('Preview game');
     deps.engine.createScene(session.project, 'Scene1');
-    const { NoBrowserPreview } = await import('../src/preview.js');
-    const manager = new PreviewManager(deps as never, { tmpRoot: dir, exporter: new CountingExporter(), browser: new NoBrowserPreview() });
+    const { NullPreviewBrowser } = await import('../src/preview.js');
+    const manager = new PreviewManager(deps as never, { tmpRoot: dir, exporter: new CountingExporter(), browser: new NullPreviewBrowser() });
     managers.push(manager);
     await assert.rejects(manager.build({ sessionId: session.id, withScreenshot: true, width: 800, height: 600, durationMs: 0 }), (error: unknown) => {
       return error instanceof Error && (error as { code?: string }).code === 'preview-puppeteer-unavailable';
@@ -222,6 +260,31 @@ describe('preview double mode (issue #16)', () => {
     assert.throws(() => manager.status(), (error: unknown) => {
       return error instanceof Error && (error as { code?: string }).code === 'preview-not-found';
     });
+  });
+
+  it('dirty close refusal stops nothing: linked previews survive', async () => {
+    const { manager, deps } = makeManager();
+    const sessionId = createSession(deps);
+    await manager.build({ sessionId, withScreenshot: false, width: 800, height: 600, durationMs: 0 });
+    await assert.rejects(closeProjectWithPreviews(deps, { sessionId }), (error: unknown) => {
+      return error instanceof Error && (error as { code?: string }).code === 'session-dirty';
+    });
+    const alive = manager.status();
+    assert.match(alive.url, /^http:\/\/127\.0\.0\.1:\d+\/$/);
+    const closed = await closeProjectWithPreviews(deps, { sessionId, force: true });
+    assert.deepEqual(closed, { closed: true, stoppedPreviews: 1 });
+    assert.throws(() => manager.status(), /No active previews/);
+  });
+
+  it('get_preview_status slides the TTL window', async () => {
+    const { manager, deps } = makeManager({ ttlMs: 100 });
+    const sessionId = createSession(deps);
+    await manager.build({ sessionId, withScreenshot: false, width: 800, height: 600, durationMs: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    manager.status();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    // 120ms past the build: dead without the status refresh, alive with it.
+    assert.ok(manager.status().previewId);
   });
 
   it('concurrent builds serialize through the global queue', async () => {

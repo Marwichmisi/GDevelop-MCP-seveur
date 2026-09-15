@@ -1,8 +1,7 @@
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
-import { writeFile } from 'node:fs/promises';
 import { McpError } from './errors.js';
-import type { PreviewBrowser } from './preview.js';
+import type { PreviewBrowser, PreviewCaptureOptions } from './preview.js';
 
 /**
  * Headless-browser capture for playable previews (issue #16, research §4.2).
@@ -54,7 +53,7 @@ const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 export class PuppeteerBrowser implements PreviewBrowser {
   async capture(
     url: string,
-    options: { width: number; height: number; durationMs: number; withScreenshot: boolean; outDir: string },
+    options: PreviewCaptureOptions,
   ): Promise<{ logs: string[]; pageErrors: string[]; screenshotPath: string | null }> {
     const puppeteer = resolvePuppeteer() as {
       launch(options: { headless: boolean; executablePath?: string; args: string[] }): Promise<PuppeteerBrowserHandle>;
@@ -118,15 +117,4 @@ export class PuppeteerBrowser implements PreviewBrowser {
       await browser.close().catch(() => undefined);
     }
   }
-}
-
-/** 1×1 PNG placeholder used by tests via the `PreviewBrowser` seam. */
-export async function writePlaceholderPng(path: string): Promise<void> {
-  await writeFile(
-    path,
-    Buffer.from(
-      '89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c626001000000ffff03000006000557bfabd40000000049454e44ae426082',
-      'hex',
-    ),
-  );
 }

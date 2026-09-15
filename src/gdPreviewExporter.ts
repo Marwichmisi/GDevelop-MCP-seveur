@@ -4,7 +4,7 @@ import { basename, dirname, isAbsolute, join, normalize, relative, resolve } fro
 import { fileURLToPath } from 'node:url';
 import { McpError } from './errors.js';
 import type { EngineProject } from './engine.js';
-import type { PreviewExporter } from './preview.js';
+import { sanitizeDracoScriptIncludes, type PreviewExporter } from './preview.js';
 
 /**
  * Real GDJS preview exporter over libGD.js (issue #16, research §1 + §3.1 + §6).
@@ -172,10 +172,9 @@ export class GdPreviewExporter implements PreviewExporter {
       // Draco fix (research §6.2): some artifact combos list the raw Draco
       // wasm as a script include — it must load via DRACOLoader, never as JS.
       const indexFile = join(outDir, 'index.html');
-      const html = readFileSync(indexFile, 'utf8');
-      const sanitized = html.replace(/^\s*<script[^>]+src=["'][^"']+\.wasm["'][^>]*><\/script>\s*$/gm, '');
-      if (sanitized !== html) writeFileSync(indexFile, sanitized);
-      return { sanitizedDraco: sanitized !== html };
+      const { html, sanitized } = sanitizeDracoScriptIncludes(readFileSync(indexFile, 'utf8'));
+      if (sanitized) writeFileSync(indexFile, html);
+      return { sanitizedDraco: sanitized };
     } finally {
       for (const handle of [options, exporter, fileSystem] as { delete(): void }[]) {
         try {
