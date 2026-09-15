@@ -9,7 +9,10 @@ export type McpErrorCode =
   | 'post-apply-failed'
   | 'io-error'
   | 'libgd-unavailable'
-  | 'catalog-unavailable';
+  | 'catalog-unavailable'
+  | 'preview-not-found'
+  | 'preview-export-failed'
+  | 'preview-puppeteer-unavailable';
 
 export class McpError extends Error {
   readonly code: McpErrorCode;

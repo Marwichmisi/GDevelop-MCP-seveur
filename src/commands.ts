@@ -7,6 +7,8 @@ import type { ProjectStore } from './sessions.js';
 export interface CommandDeps {
   store: ProjectStore;
   engine: EnginePorts;
+  /** Optional preview manager (issue #16): closed sessions stop linked previews first. */
+  previews?: { stopForSession(sessionId: string): Promise<unknown> } | undefined;
 }
 
 /** Lifecycle commands for empty projects through the real `gd.Project`. Thin
@@ -111,8 +113,25 @@ export function closeProject(
   deps: CommandDeps,
   args: { sessionId: string; force?: boolean | undefined },
 ): { closed: true } {
+  // Sync headless seam: closes the session only. Preview cleanup lives in
+  // `closeProjectWithPreviews` below (ports + temp dirs must be released
+  // first); the `close_project` tool awaits that async entry point.
   deps.store.close(args.sessionId, { force: args.force });
   return { closed: true };
+}
+
+export async function closeProjectWithPreviews(
+  deps: CommandDeps,
+  args: { sessionId: string; force?: boolean | undefined },
+): Promise<{ closed: true; stoppedPreviews: number }> {
+  if (deps.previews) {
+    const result = (await deps.previews.stopForSession(args.sessionId)) as { stopped: number };
+    const stopped = typeof result?.stopped === 'number' ? result.stopped : 0;
+    deps.store.close(args.sessionId, { force: args.force });
+    return { closed: true, stoppedPreviews: stopped };
+  }
+  deps.store.close(args.sessionId, { force: args.force });
+  return { closed: true, stoppedPreviews: 0 };
 }
 
 /**

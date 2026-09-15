@@ -1,6 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { closeProject, createProject, describeProject, openProject, saveProject, undoLastEdit, type CommandDeps } from './commands.js';
+import { closeProjectWithPreviews, createProject, describeProject, openProject, saveProject, undoLastEdit, type CommandDeps } from './commands.js';
 import {
   addObject,
   addToGroup,
@@ -54,11 +54,23 @@ import {
   searchInstructions,
   type Catalog,
 } from './catalog.js';
+import {
+  previewSchemas,
+  type PreviewRecord,
+  type StaticRenderResult,
+} from './preview.js';
 
 export interface ToolDefinition {
   name: string;
+  title?: string | undefined;
   description: string;
   inputSchema: Record<string, z.ZodTypeAny>;
+  annotations?: {
+    readOnlyHint?: boolean | undefined;
+    destructiveHint?: boolean | undefined;
+    idempotentHint?: boolean | undefined;
+    openWorldHint?: boolean | undefined;
+  } | undefined;
   handler: (args: Record<string, unknown>) => Promise<{ content: { type: 'text'; text: string }[] }>;
 }
 
@@ -117,13 +129,15 @@ export function createProjectTools(deps: CommandDeps): ToolDefinition[] {
     },
     {
       name: 'close_project',
-      description: 'Close a session. Refuses when dirty unless force:true.',
+      title: 'Close project session',
+      description: 'Close a session. Refuses when dirty unless force:true. Stops linked previews first.',
       inputSchema: {
         sessionId: z.string().uuid().describe('Session UUID'),
         force: z.boolean().optional().describe('Discard unsaved changes'),
       },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       handler: async (args) =>
-        text(closeProject(deps, { sessionId: args['sessionId'] as string, force: args['force'] as boolean | undefined })),
+        text(await closeProjectWithPreviews(deps, { sessionId: args['sessionId'] as string, force: args['force'] as boolean | undefined })),
     },
     {
       name: 'undo_last_edit',
@@ -138,8 +152,13 @@ export function createProjectTools(deps: CommandDeps): ToolDefinition[] {
 export function registerProjectTools(server: McpServer, deps: CommandDeps, catalog?: Catalog): void {
   const tools = [...createProjectTools(deps), ...createContentTools(deps), ...createEventTools(deps)];
   if (catalog) tools.push(...createCatalogTools(catalog));
+  if (deps.previews) tools.push(...createPreviewTools(deps.previews as unknown as PreviewManagerLike));
   for (const tool of tools) {
-    server.registerTool(tool.name, { description: tool.description, inputSchema: tool.inputSchema }, tool.handler);
+    server.registerTool(
+      tool.name,
+      { ...(tool.title ? { title: tool.title } : {}), description: tool.description, inputSchema: tool.inputSchema, ...(tool.annotations ? { annotations: tool.annotations } : {}) },
+      tool.handler,
+    );
   }
 }
 
@@ -375,6 +394,58 @@ export function createCatalogTools(catalog: Catalog): ToolDefinition[] {
       describeExtension,
       catalog,
     ),
+  ];
+}
+
+/** Minimal structural seam for the preview manager (avoids a tools↔preview import cycle). */
+export interface PreviewManagerLike {
+  renderStatic(input: unknown): StaticRenderResult;
+  build(input: unknown): Promise<PreviewRecord>;
+  status(previewId?: string | undefined): PreviewRecord;
+  stop(previewId: string): Promise<{ stopped: true; previewId: string }>;
+}
+
+/**
+ * The 4 preview tools (issue #16). Schemas are strict zod (`.strict()` is
+ * enforced at call time via `previewSchemas` parse); annotations follow the
+ * mcp-builder checklist so clients can reason about side effects.
+ */
+export function createPreviewTools(previews: PreviewManagerLike): ToolDefinition[] {
+  return [
+    {
+      name: 'render_scene_static',
+      title: 'Render scene (static)',
+      description:
+        'Instant static render of a scene (<1s, pure SVG over the content view, no browser). Use after each mutation for a fast visual check; use build_preview for the playable build.',
+      inputSchema: previewSchemas.renderSceneStatic.shape,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      handler: async (args) => text(previews.renderStatic(args)),
+    },
+    {
+      name: 'build_preview',
+      title: 'Build playable preview',
+      description:
+        'Build a playable GDJS preview from the live memory session (no save, project file untouched) and serve it on 127.0.0.1 with logs. Rebuilds only when dirty (sha256); screenshot is opt-in and slow.',
+      inputSchema: previewSchemas.buildPreview.shape,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      handler: async (args) => text(await previews.build(args)),
+    },
+    {
+      name: 'get_preview_status',
+      title: 'Get preview status',
+      description: 'Show a preview record (url, scene, logs, screenshot). No previewId = newest active preview.',
+      inputSchema: previewSchemas.getPreviewStatus.shape,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      handler: async (args) => text(previews.status(args['previewId'] as string | undefined)),
+    },
+    {
+      name: 'stop_preview',
+      title: 'Stop preview',
+      description: 'Stop a preview: close its loopback server and delete its temp dir. TTL (30 min) does the same automatically.',
+      inputSchema: previewSchemas.stopPreview.shape,
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+      handler: async (args) => text(await previews.stop(args['previewId'] as string)),
+    },
   ];
 }
 
