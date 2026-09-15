@@ -12,6 +12,7 @@ import type {
   EngineProject,
   EventNodeInput,
   ImportResourceInput,
+  InstallAssetObjectInput,
   MoveEventInput,
   PlaceInstanceInput,
   ProjectSummary,
@@ -37,6 +38,7 @@ import {
   deleteScene,
   describeContentState,
   importResource,
+  installAssetObject,
   moveInstancesToLayer,
   moveLayer,
   moveScene,
@@ -258,6 +260,9 @@ export function createFakeEngine(
     },
     importResource(project: EngineProject, input: ImportResourceInput): { name: string } {
       return importResource((project as FakeProject).state, input);
+    },
+    installAssetObject(project: EngineProject, input: InstallAssetObjectInput): void {
+      installAssetObject((project as FakeProject).state, input);
     },
     removeResource(project: EngineProject, name: string): void {
       removeResource((project as FakeProject).state, name);

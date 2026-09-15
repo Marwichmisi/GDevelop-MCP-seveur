@@ -55,6 +55,17 @@ import {
   type Catalog,
 } from './catalog.js';
 import {
+  assetSchemas,
+  assetStatus,
+  getAssetDetails,
+  getExampleDetails,
+  importAssetsIntoProject,
+  listExamples,
+  openExample,
+  searchAssets,
+  type AssetStore,
+} from './assets.js';
+import {
   previewSchemas,
   type PreviewRecord,
   type StaticRenderResult,
@@ -149,9 +160,10 @@ export function createProjectTools(deps: CommandDeps): ToolDefinition[] {
   ];
 }
 
-export function registerProjectTools(server: McpServer, deps: CommandDeps, catalog?: Catalog): void {
+export function registerProjectTools(server: McpServer, deps: CommandDeps, catalog?: Catalog, assets?: AssetStore): void {
   const tools = [...createProjectTools(deps), ...createContentTools(deps), ...createEventTools(deps)];
   if (catalog) tools.push(...createCatalogTools(catalog));
+  if (assets) tools.push(...createAssetTools(deps, assets));
   if (deps.previews) tools.push(...createPreviewTools(deps.previews as unknown as PreviewPorts));
   for (const tool of tools) {
     server.registerTool(
@@ -394,6 +406,88 @@ export function createCatalogTools(catalog: Catalog): ToolDefinition[] {
       describeExtension,
       catalog,
     ),
+  ];
+}
+
+function assetTool<K extends keyof typeof assetSchemas>(
+  name: string,
+  description: string,
+  schemaKey: K,
+  action: (store: AssetStore, args: unknown) => unknown,
+  store: AssetStore,
+  annotations?: ToolDefinition['annotations'],
+): ToolDefinition {
+  return {
+    name,
+    description,
+    inputSchema: assetSchemas[schemaKey].shape,
+    ...(annotations ? { annotations } : {}),
+    handler: async (args) => text(await action(store, args)),
+  };
+}
+
+/**
+ * The 7 Asset Store tools (issue #18). Read-only search/details plus the
+ * targeted import (moteur, tout-ou-rien) and read-only example sessions.
+ * Private/premium packs are refused cleanly (public CDN only).
+ */
+export function createAssetTools(deps: CommandDeps, store: AssetStore): ToolDefinition[] {
+  return [
+    assetTool(
+      'asset_status',
+      'Show the pinned Asset Store versions (public CDN, TTL 1h) and indexed counts. refresh:true re-reads the cached lists.',
+      'status',
+      assetStatus,
+      store,
+      { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    ),
+    assetTool(
+      'search_assets',
+      'Search public Asset Store headers by query/tags/objectType/license/pack. Exposes licenses and preview URLs; the engine judges at import time.',
+      'searchAssets',
+      searchAssets,
+      store,
+      { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    ),
+    assetTool(
+      'get_asset_details',
+      'Show one public asset (version, authors, license, objectAssets with type/resources/requiredExtensions). Private assets are refused at import time.',
+      'getAssetDetails',
+      getAssetDetails,
+      store,
+      { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    ),
+    {
+      name: 'import_assets_into_project',
+      description:
+        'Import targeted assets into a session ({pack, packVersion, assets} targeted by default, "all" opt-in): required-extension check with explicit refusal, local copy + import_resource, engine deserialization via Serializer.fromJSObject with `as` rename on collision. Private/premium refused. All-or-nothing.',
+      inputSchema: assetSchemas.importAssets.shape,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      handler: async (args) => text(await importAssetsIntoProject(deps, store, args)),
+    },
+    assetTool(
+      'list_examples',
+      'List public GDevelop examples by query/tags/license/difficulty. Read-only.',
+      'listExamples',
+      listExamples,
+      store,
+      { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    ),
+    assetTool(
+      'get_example_details',
+      'Show one public example by id or slug (license, projectFileUrl, usedExtensions). Read-only.',
+      'getExampleDetails',
+      getExampleDetails,
+      store,
+      { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    ),
+    {
+      name: 'open_example',
+      description: 'Open a public example projectFileUrl in a read-only session (describe only, no save, no mutation).',
+      inputSchema: assetSchemas.openExample.shape,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      handler: async (args) => text(await openExample(deps, store, args)),
+    },
   ];
 }
 

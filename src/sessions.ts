@@ -12,6 +12,8 @@ export interface Session {
   dirty: boolean;
   /** Copie disque `-pre-restore` (état pré-save) pour undo_last_edit one-shot. */
   preRestorePath: string | null;
+  /** Session lecture (exemple) : describe seul, save et mutations refusés. */
+  readOnly: boolean;
 }
 
 export interface ProjectStoreOptions {
@@ -33,7 +35,7 @@ export class ProjectStore {
 
   create(name: string): Session {
     const project = this.engine.createProject(name);
-    const session: Session = { id: randomUUID(), project, filePath: null, dirty: false, preRestorePath: null };
+    const session: Session = { id: randomUUID(), project, filePath: null, dirty: false, preRestorePath: null, readOnly: false };
     this.sessions.set(session.id, session);
     return session;
   }
@@ -58,7 +60,18 @@ export class ProjectStore {
       throw new McpError('io-error', `Cannot read project file at ${absolute}.`, { cause: error });
     }
     const project = this.engine.loadProjectFromJson(json, absolute);
-    const session: Session = { id: randomUUID(), project, filePath: absolute, dirty: false, preRestorePath: null };
+    const session: Session = { id: randomUUID(), project, filePath: absolute, dirty: false, preRestorePath: null, readOnly: false };
+    this.sessions.set(session.id, session);
+    return session;
+  }
+
+  /**
+   * Ouvre un projet déjà parsé (JSON example) en session lecture :
+   * dirty jamais marqué, save refusé, mutations refusées par le pipeline.
+   */
+  openFromJson(json: string, label: string): Session {
+    const project = this.engine.loadProjectFromJson(json, label);
+    const session: Session = { id: randomUUID(), project, filePath: null, dirty: false, preRestorePath: null, readOnly: true };
     this.sessions.set(session.id, session);
     return session;
   }

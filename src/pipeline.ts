@@ -42,6 +42,11 @@ export function runMutation<TArgs, TResult>(
   mutation: Mutation<TArgs, TResult>,
 ): TResult {
   const session = store.get(mutation.sessionId);
+  if (session.readOnly === true) {
+    throw validationFailed(
+      `Session ${mutation.sessionId} is read-only (example opened in read mode): describe only, no mutation, no save.`,
+    );
+  }
   const snapshot = engine.serializeProject(session.project);
   const baseline = new Set(engine.listDiagnostics(session.project).map(diagnosticKey));
 

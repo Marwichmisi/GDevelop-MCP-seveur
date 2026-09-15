@@ -19,6 +19,7 @@ import {
   type EventNodeInput,
   type EventSelector,
   type ImportResourceInput,
+  type InstallAssetObjectInput,
   type MoveEventInput,
   type PlaceInstanceInput,
   type ProjectSummary,
@@ -127,6 +128,9 @@ interface GdGroupsContainer {
 
 interface GdObjectHandle {
   setName(name: string): void;
+  unserializeFrom(project: GdProjectHandle, element: GdSerializerElement): void;
+  resetPersistentUuid(): void;
+  setAssetStoreId(id: string): void;
   addNewBehavior(project: GdProjectHandle, type: string, name: string): GdBehaviorHandle;
   hasBehaviorNamed(name: string): boolean;
   getBehavior(name: string): GdBehaviorHandle;
@@ -1402,6 +1406,37 @@ export function createRealEngine(gd: GdNamespace): EnginePorts {
       const resources = (project as GdProjectHandle).getResourcesManager();
       if (!resources.hasResource(name)) throw validationFailed(`Unknown resource "${name}".`);
       resources.removeResource(name);
+    },
+    installAssetObject(project: EngineProject, input: InstallAssetObjectInput): void {
+      const handle = project as GdProjectHandle;
+      const container = objectsContainer(handle, input.scene);
+      const where = containerWhere(input.scene);
+      if (container.hasObjectNamed(input.name)) {
+        throw validationFailed(`Object "${input.name}" already exists in ${where}.`);
+      }
+      if (typeof input.type !== 'string' || input.type === '') {
+        throw validationFailed('Asset object has no type: refusing install.');
+      }
+      if (typeof input.serializedObject !== 'object' || input.serializedObject === null) {
+        throw validationFailed('Asset object payload is not an object: refusing install.');
+      }
+      checkObjectType(gd, handle, input.type);
+      const object = container.insertNewObject(handle, input.type, input.name, container.getObjectsCount());
+      try {
+        const element = gd.Serializer.fromJSObject(input.serializedObject);
+        try {
+          object.unserializeFrom(handle, element);
+        } finally {
+          element.delete();
+        }
+        // L'unserialize écrase le nom : le restaurer, puis tracer l'origine.
+        object.setName(input.name);
+        object.resetPersistentUuid();
+        if (input.assetStoreId !== undefined) object.setAssetStoreId(input.assetStoreId);
+      } catch (error) {
+        container.removeObject(input.name);
+        throw error;
+      }
     },
     appendSceneEvents(project: EngineProject, input: AppendEventsInput): AppendEventsResult {
       const handle = project as GdProjectHandle;

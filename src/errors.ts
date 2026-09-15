@@ -10,6 +10,7 @@ export type McpErrorCode =
   | 'io-error'
   | 'libgd-unavailable'
   | 'catalog-unavailable'
+  | 'asset-unavailable'
   | 'preview-not-found'
   | 'preview-export-failed'
   | 'preview-puppeteer-unavailable';

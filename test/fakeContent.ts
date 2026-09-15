@@ -64,6 +64,8 @@ export interface FakeObjectState {
   type: string;
   variables: SerializedVariable[];
   behaviors: FakeBehaviorState[];
+  /** Tracé par installAssetObject (ticket #18) : id Asset Store d'origine. */
+  assetStoreId?: string | undefined;
 }
 
 export interface FakeBehaviorState {
@@ -281,6 +283,36 @@ export function createObject(state: FakeContentState, input: CreateObjectInput):
   });
   const variables = Object.entries(input.variables ?? {}).map(([key, value]) => toVariableNode(key, value));
   objects.push({ name: input.name, type: input.type, variables, behaviors });
+}
+
+/**
+ * Fake de la désérialisation moteur (ticket #18) : valide avant de muter,
+ * pose l'objet avec son type/name finaux + assetStoreId tracé. Le contenu
+ * sérialisé détaillé (animations…) n'a pas d'équivalent fake : seul le
+ * contrat nom/type/assetStoreId est prouvé ici, le round-trip réel est
+ * couvert par la suite opt-in libGD.
+ */
+export function installAssetObject(
+  state: FakeContentState,
+  input: { scene?: string | undefined; type: string; name: string; serializedObject: unknown; assetStoreId?: string | undefined },
+): void {
+  const { objects, where } = objectContainer(state, input.scene);
+  if (objects.some((candidate) => candidate.name === input.name)) {
+    throw validationFailed(`Object "${input.name}" already exists in ${where}.`);
+  }
+  if (typeof input.type !== 'string' || input.type === '') {
+    throw validationFailed('Asset object has no type: refusing install.');
+  }
+  if (typeof input.serializedObject !== 'object' || input.serializedObject === null) {
+    throw validationFailed('Asset object payload is not an object: refusing install.');
+  }
+  objects.push({
+    name: input.name,
+    type: input.type,
+    variables: [],
+    behaviors: [],
+    ...(input.assetStoreId !== undefined ? { assetStoreId: input.assetStoreId } : {}),
+  });
 }
 
 export function normalizeProperties(

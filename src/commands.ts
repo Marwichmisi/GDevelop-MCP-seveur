@@ -63,6 +63,11 @@ export function saveProject(
   args: { sessionId: string; path?: string | undefined },
 ): { path: string; backupPath: string | null; preRestorePath: string | null; bytes: number } {
   const session = deps.store.get(args.sessionId);
+  if (session.readOnly === true) {
+    throw validationFailed(
+      `Session ${args.sessionId} is read-only (example opened in read mode): describe only, no save.`,
+    );
+  }
   const rawTarget = args.path ?? session.filePath;
   if (!rawTarget) {
     throw validationFailed('No target path: pass an explicit path or open the session from a file first.');

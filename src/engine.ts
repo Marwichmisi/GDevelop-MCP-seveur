@@ -141,6 +141,21 @@ export interface ImportResourceInput {
   file: string;
 }
 
+/**
+ * Import d'asset ciblé (ticket #18) : désérialisation moteur du
+ * `object` sérialisé via `Serializer.fromJSObject`, avec renommage `as`
+ * géré par l'appelant. L'implémentation réelle fait
+ * `insertNewObject` + `unserializeFrom` + `setName` + `resetPersistentUuid`
+ * + `setAssetStoreId` ; le fake stocke l'objet sérialisé pour preuve.
+ */
+export interface InstallAssetObjectInput {
+  scene?: string | undefined;
+  type: string;
+  name: string;
+  serializedObject: unknown;
+  assetStoreId?: string | undefined;
+}
+
 /** Single condition/action instruction: positional string parameters, faithful to the engine. */
 export interface EventInstructionInput {
   type: string;
@@ -337,6 +352,7 @@ export interface EnginePorts {
   removeObjectFromGroup(project: EngineProject, scene: string | undefined, group: string, object: string): void;
   importResource(project: EngineProject, input: ImportResourceInput): { name: string };
   removeResource(project: EngineProject, name: string): void;
+  installAssetObject(project: EngineProject, input: InstallAssetObjectInput): void;
   // --- Events (ticket #14). Every method validates everything before
   // mutating anything and throws `validation-failed` on refusal, so a
   // rejected call leaves the project untouched. Ids are stamped at creation

@@ -3,9 +3,11 @@ import assert from 'node:assert/strict';
 import { z } from 'zod';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 import { ProjectStore } from '../src/sessions.js';
-import { createCatalogTools, createContentTools, createEventTools, createProjectTools } from '../src/tools.js';
+import { createAssetTools, createCatalogTools, createContentTools, createEventTools, createProjectTools } from '../src/tools.js';
 import { Catalog } from '../src/catalog.js';
 import { makeFixtureSource } from './catalogFixtures.js';
+import { AssetStore } from '../src/assets.js';
+import { makeFixtureAssetSource } from './assetFixtures.js';
 import { createFakeEngine } from './fakeEngine.js';
 import { contentSchemas } from '../src/content.js';
 import { eventsSchemas } from '../src/events.js';
@@ -20,11 +22,13 @@ describe('tool schemas stay provider-safe (no recursive $ref)', () => {
   it('exposes zero $ref across project+content+event+catalog tools (same conversion as the SDK)', () => {
     const deps = makeDeps();
     const catalog = new Catalog(makeFixtureSource());
+    const assets = new AssetStore(makeFixtureAssetSource());
     const tools = [
       ...createProjectTools(deps),
       ...createContentTools(deps),
       ...createEventTools(deps),
       ...createCatalogTools(catalog),
+      ...createAssetTools(deps, assets),
     ];
     assert.ok(tools.length > 30);
     const offenders: string[] = [];
