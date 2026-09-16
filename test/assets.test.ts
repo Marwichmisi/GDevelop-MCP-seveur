@@ -61,6 +61,51 @@ describe('asset store ciblé (ticket #18) : lecture sur fixtures', () => {
     assert.equal(none.matched, 0);
   });
 
+  it('search_assets tolère les fiches incomplètes (ticket #28) : pas de TypeError', async () => {
+    const source = makeFixtureAssetSource();
+    const original = source.listHeaders.bind(source);
+    source.listHeaders = (async () => {
+      const headers = (await original()) as unknown as Record<string, unknown>[];
+      return [
+        ...headers,
+        { id: 'incomplete000000000000000000000001' },
+        { id: 'incomplete000000000000000000000002', name: 'Broken coin', tags: 'not-an-array' },
+        { id: 'incomplete000000000000000000000003', name: 'Empty tags coin', tags: [] },
+      ];
+    }) as unknown as typeof source.listHeaders;
+    const assets = new AssetStore(source);
+
+    const coin = await searchAssets(assets, { query: 'coin' });
+    assert.equal(coin.assets[0]?.name, 'Bronze Coin');
+    assert.ok(
+      coin.matched >= 1,
+      `attendu au moins Bronze Coin, reçu ${coin.matched}`,
+    );
+
+    const none = await searchAssets(assets, { query: 'zzz-no-such-asset' });
+    assert.equal(none.matched, 0);
+    assert.deepEqual(none.assets, []);
+  });
+
+  it('search_assets avec pack sans tag (ticket #28) : aucun faux-positif', async () => {
+    const source = makeFixtureAssetSource();
+    const origHeaders = source.listHeaders.bind(source);
+    source.listHeaders = (async () => {
+      const headers = (await origHeaders()) as unknown as Record<string, unknown>[];
+      return [...headers, { id: 'notag0000000000000000000000000001' }];
+    }) as unknown as typeof source.listHeaders;
+    const origPacks = source.listPacks.bind(source);
+    source.listPacks = (async () => {
+      const packs = (await origPacks()) as unknown as Record<string, unknown>[];
+      return [...packs, { name: 'Ghost pack' }];
+    }) as unknown as typeof source.listPacks;
+    const assets = new AssetStore(source);
+
+    const ghost = await searchAssets(assets, { pack: 'ghost pack' });
+    assert.equal(ghost.matched, 0);
+    assert.deepEqual(ghost.assets, []);
+  });
+
   it('garde le cache en mémoire pendant le TTL puis recharge', async () => {
     let now = 1_000;
     const source = makeFixtureAssetSource();
@@ -275,6 +320,22 @@ describe('asset store ciblé (ticket #18) : import moteur tout-ou-rien', () => {
       }),
       /kind "nope-kind" is not supported/,
     );
+  });
+  it('list_examples tolère les fiches incomplètes (ticket #28) : pas de TypeError', async () => {
+    const source = makeFixtureAssetSource();
+    const original = source.listExampleHeaders.bind(source);
+    source.listExampleHeaders = (async () => {
+      const headers = (await original()) as unknown as Record<string, unknown>[];
+      return [...headers, { id: 'incomplete-example' }, { id: 'incomplete-example-2', name: 'Broken', tags: 'x' }];
+    }) as unknown as typeof source.listExampleHeaders;
+    const assets = new AssetStore(source);
+
+    const found = await listExamples(assets, { query: 'platform' });
+    assert.equal(found.examples[0]?.slug, 'platformer');
+
+    const none = await listExamples(assets, { query: 'zzz-no-such-example' });
+    assert.equal(none.matched, 0);
+    assert.deepEqual(none.examples, []);
   });
 });
 

@@ -156,16 +156,30 @@ function parseArgs<T>(schema: z.ZodType<T>, args: unknown): T {
   }
 }
 
-function matchesQuery(query: string | undefined, fields: string[]): boolean {
+/**
+ * Tolérance aux fiches CDN incomplètes (ticket #28) : un champ manquant ou
+ * mal typé vaut chaîne vide / liste vide au lieu de lever un TypeError.
+ * Seule une panne réseau/CDN avérée donne un refus `asset-unavailable`.
+ */
+function searchText(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function tagList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((t): t is string => typeof t === 'string');
+}
+
+function matchesQuery(query: string | undefined, fields: unknown[]): boolean {
   if (!query) return true;
   const needle = query.trim().toLowerCase();
   if (needle === '') return true;
-  return fields.some((field) => field.toLowerCase().includes(needle));
+  return fields.some((field) => typeof field === 'string' && field.toLowerCase().includes(needle));
 }
 
-function matchesTags(wanted: string[] | undefined, actual: string[]): boolean {
+function matchesTags(wanted: string[] | undefined, actual: unknown): boolean {
   if (!wanted || wanted.length === 0) return true;
-  const lower = actual.map((t) => t.toLowerCase());
+  const lower = tagList(actual).map((t) => t.toLowerCase());
   return wanted.every((tag) => lower.includes(tag.toLowerCase()));
 }
 
@@ -203,16 +217,17 @@ export function decodedAssetFilename(url: string): string {
 function resolvePack(packs: AssetPackSummary[], wanted: string): AssetPackSummary | null {
   const needle = wanted.trim().toLowerCase();
   return (
-    packs.find((p) => p.tag.toLowerCase() === needle) ??
-    packs.find((p) => p.name.toLowerCase() === needle) ??
+    packs.find((p) => searchText(p.tag).toLowerCase() === needle) ??
+    packs.find((p) => searchText(p.name).toLowerCase() === needle) ??
     null
   );
 }
 
 function headersOfPack(headers: AssetShortHeader[], pack: AssetPackSummary): AssetShortHeader[] {
-  const tag = pack.tag.toLowerCase();
+  const tag = searchText(pack.tag).toLowerCase();
+  if (tag === '') return [];
   return headers.filter(
-    (h) => (h.assetPackId ?? '').toLowerCase() === tag || h.tags.some((t) => t.toLowerCase() === tag),
+    (h) => searchText(h.assetPackId).toLowerCase() === tag || tagList(h.tags).some((t) => t.toLowerCase() === tag),
   );
 }
 
@@ -264,9 +279,9 @@ export async function searchAssets(store: AssetStore, args: unknown): Promise<{
   }
   const matched = headers.filter(
     (h) =>
-      matchesQuery(parsed.query, [h.name, h.shortDescription, ...h.tags]) &&
+      matchesQuery(parsed.query, [searchText(h.name), searchText(h.shortDescription), ...tagList(h.tags)]) &&
       matchesTags(parsed.tags, h.tags) &&
-      (parsed.objectType === undefined || h.objectType.toLowerCase() === parsed.objectType.toLowerCase()) &&
+      (parsed.objectType === undefined || searchText(h.objectType).toLowerCase() === parsed.objectType.toLowerCase()) &&
       (parsed.license === undefined || h.license === parsed.license),
   );
   return {
@@ -301,11 +316,11 @@ export async function listExamples(store: AssetStore, args: unknown): Promise<{
   }
   const matched = headers.filter(
     (h) =>
-      matchesQuery(parsed.query, [h.name, h.shortDescription, ...h.tags]) &&
+      matchesQuery(parsed.query, [searchText(h.name), searchText(h.shortDescription), ...tagList(h.tags)]) &&
       matchesTags(parsed.tags, h.tags) &&
       (parsed.license === undefined || h.license === parsed.license) &&
       (parsed.difficulty === undefined ||
-        (h.difficultyLevel ?? '').toLowerCase() === parsed.difficulty.toLowerCase()),
+        searchText(h.difficultyLevel).toLowerCase() === parsed.difficulty.toLowerCase()),
   );
   return {
     pin: { ref: ASSET_PIN_REF },
