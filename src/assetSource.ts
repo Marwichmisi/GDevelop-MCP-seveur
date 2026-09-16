@@ -217,11 +217,35 @@ export class HttpAssetSource implements AssetSource {
   }
 
   async listExampleHeaders(): Promise<ExampleShortHeader[]> {
+    // Ticket #29 : le CDN renvoie désormais un tableau brut ([...] 285 entrées,
+    // vérifié live 2026-09-16) au lieu de l'enveloppe legacy
+    // `{ exampleShortHeaders: [...] }`. On tolère les deux formes (+ variantes
+    // d'enveloppe courantes) ; seule une charge réellement inexploitable donne
+    // le refus codé `asset-unavailable`.
     const data = (await withRetry(2, () =>
       fetchJson(this.fetchImpl, 'https://resources.gdevelop-app.com/examples-database/examples-database-v2.json'),
-    )) as { exampleShortHeaders?: unknown };
-    if (!Array.isArray(data.exampleShortHeaders)) throw assetError('Asset CDN returned an unexpected examples shape.');
-    return data.exampleShortHeaders as ExampleShortHeader[];
+    )) as unknown;
+    // Durcissement revue Spec : filtre les entrées non-objets (null, string…)
+    // pour ne jamais lever un TypeError plus loin dans statut/liste/détail
+    // (esprit ticket #28). Les fiches incomplètes mais objets sont gardées :
+    // la recherche aval les tolère via searchText/tagList.
+    const onlyObjects = (value: unknown[]): ExampleShortHeader[] =>
+      value.filter((entry): entry is ExampleShortHeader => entry !== null && typeof entry === 'object');
+    if (Array.isArray(data)) return onlyObjects(data);
+    if (data !== null && typeof data === 'object') {
+      const record = data as Record<string, unknown>;
+      const candidates = [
+        record['exampleShortHeaders'],
+        record['examples'],
+        record['data'],
+        record['items'],
+        record['results'],
+      ];
+      for (const candidate of candidates) {
+        if (Array.isArray(candidate)) return onlyObjects(candidate);
+      }
+    }
+    throw assetError('Asset CDN returned an unexpected examples shape.');
   }
 
   async listExampleFilters(): Promise<{ allTags: string[]; defaultTags: string[]; tagsTree: unknown[] }> {
