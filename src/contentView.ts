@@ -310,11 +310,20 @@ function readInstructionType(raw: unknown): string {
 
 function readInstruction(node: SerializedInstruction): InstructionView {
   const parameters = Array.isArray(node.parameters) ? node.parameters.map((p) => String(p)) : [];
+  // Ticket #30 : le moteur niche les drapeaux dans `type`
+  // (`{ value, inverted, await }`, prouvé live libGD 5.6.281), sans clés
+  // racine. Le fake écrit les clés racine (`inverted`/`awaited`) : on lit
+  // les deux formes, la forme moteur ne masquant jamais la racine.
+  const typeNode: unknown = node.type;
+  const nestedTypeFlags: { inverted?: unknown; await?: unknown; awaited?: unknown } | null =
+    typeof typeNode === 'object' && typeNode !== null
+      ? (typeNode as { inverted?: unknown; await?: unknown; awaited?: unknown })
+      : null;
   return {
     type: readInstructionType(node.type),
     parameters,
-    inverted: node.inverted === true,
-    awaited: node.awaited === true,
+    inverted: node.inverted === true || nestedTypeFlags?.inverted === true,
+    awaited: node.awaited === true || nestedTypeFlags?.await === true || nestedTypeFlags?.awaited === true,
   };
 }
 

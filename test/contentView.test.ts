@@ -104,4 +104,50 @@ describe('content view reader', () => {
     const view = readContentView({ resources: [{ name: 'a', kind: 'audio', file: 'a.wav' }] });
     assert.deepEqual(view.resources, [{ name: 'a', kind: 'audio', file: 'a.wav' }]);
   });
+
+  it('ticket #30 : relit inverted/awaited nichés dans type (forme moteur réelle)', () => {
+    // Forme moteur prouvée live (libGD 5.6.281) : l'instruction sérialise
+    // `{ type: { value, inverted, await }, parameters }`, sans clés racine.
+    const view = readContentView({
+      layouts: [
+        {
+          name: 'Niveau1',
+          events: [
+            {
+              type: 'BuiltinCommonInstructions::Standard',
+              conditions: [
+                { type: { value: 'VarScene', inverted: true }, parameters: ['Score', '=', '0'] },
+                { type: { value: 'VarScene' }, parameters: ['Score', '>=', '0'] },
+              ],
+              actions: [{ type: { value: 'ModVarScene', await: true }, parameters: ['Score', '+', '1'] }],
+            },
+          ],
+        },
+      ],
+    });
+    const conditions = view.scenes[0]?.events[0]?.conditions ?? [];
+    assert.equal(conditions[0]?.type, 'VarScene');
+    assert.equal(conditions[0]?.inverted, true);
+    assert.equal(conditions[1]?.inverted, false);
+    assert.equal(view.scenes[0]?.events[0]?.actions[0]?.awaited, true);
+  });
+
+  it('ticket #30 : garde la compatibilité racines inverted/awaited (forme fake)', () => {
+    const view = readContentView({
+      layouts: [
+        {
+          name: 'Niveau1',
+          events: [
+            {
+              type: 'BuiltinCommonInstructions::Standard',
+              conditions: [{ type: 'VarScene', parameters: ['Score', '=', '0'], inverted: true }],
+              actions: [{ type: 'ModVarScene', parameters: ['Score', '+', '1'] }],
+            },
+          ],
+        },
+      ],
+    });
+    assert.equal(view.scenes[0]?.events[0]?.conditions[0]?.inverted, true);
+    assert.equal(view.scenes[0]?.events[0]?.actions[0]?.awaited, false);
+  });
 });
