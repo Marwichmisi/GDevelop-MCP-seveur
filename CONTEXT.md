@@ -18,6 +18,10 @@ _Avoid_: backup
 Fichier `<projet>.bak-<ISO>` écrit avant chaque save atomique, restaurant l'état disque précédent.
 _Avoid_: snapshot, sauvegarde
 
+**Transaction**:
+Exécution atomique d'une ou plusieurs Ops de contenu sur une Session projet, avec Snapshot mémoire, compensation fichiers et gates qui restaurent tout en cas d'échec.
+_Avoid_: batch (sauf l'outil), pipeline, unité de travail
+
 ### Contenu GDevelop
 
 **Objet**:

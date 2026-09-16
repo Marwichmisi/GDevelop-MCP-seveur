@@ -5,8 +5,6 @@ import { McpError } from '../src/errors.js';
 import type {
   AppendEventsInput,
   AppendEventsResult,
-  AttachBehaviorInput,
-  CreateObjectInput,
   EngineDiagnostic,
   EnginePorts,
   EngineProject,
@@ -16,47 +14,32 @@ import type {
   MoveEventInput,
   PlaceInstanceInput,
   ProjectSummary,
-  RemoveBehaviorInput,
   RemoveEventInput,
-  UpdateBehaviorInput,
   UpdateInstancePatch,
   VariableTarget,
 } from '../src/engine.js';
 import type { ContentView, JsonValue } from '../src/contentView.js';
+import { createFakeSceneObjectPorts } from './fakeSceneObjects.js';
 import {
   addObjectToGroup,
   appendSceneEvents,
-  attachBehavior,
   blankContentState,
   createGroup,
-  createLayer,
-  createObject,
-  createScene,
   deleteGroup,
-  deleteLayer,
-  deleteObject,
-  deleteScene,
   describeContentState,
   importResource,
   installAssetObject,
   moveInstancesToLayer,
-  moveLayer,
-  moveScene,
   moveSceneEvent,
   placeInstance,
-  removeBehavior,
   removeInstance,
   removeInstancesOfObject,
   removeObjectFromGroup,
   removeResource,
   removeSceneEvent,
   removeVariable,
-  renameLayer,
-  renameObject,
-  renameScene,
   renameVariable,
   setVariable,
-  updateBehavior,
   updateInstance,
   validateSceneEvents,
   type FakeContentState,
@@ -207,48 +190,8 @@ export function createFakeEngine(
     describeContent(project: EngineProject): ContentView {
       return describeContentState((project as FakeProject).state);
     },
-    createScene(project: EngineProject, name: string): void {
-      createScene((project as FakeProject).state, name);
-    },
-    renameScene(project: EngineProject, oldName: string, newName: string): void {
-      renameScene((project as FakeProject).state, oldName, newName);
-    },
-    moveScene(project: EngineProject, name: string, position: number): void {
-      moveScene((project as FakeProject).state, name, position);
-    },
-    deleteScene(project: EngineProject, name: string): void {
-      deleteScene((project as FakeProject).state, name);
-    },
-    createLayer(project: EngineProject, scene: string, name: string): void {
-      createLayer((project as FakeProject).state, scene, name);
-    },
-    renameLayer(project: EngineProject, scene: string, oldName: string, newName: string): void {
-      renameLayer((project as FakeProject).state, scene, oldName, newName);
-    },
-    moveLayer(project: EngineProject, scene: string, name: string, position: number): void {
-      moveLayer((project as FakeProject).state, scene, name, position);
-    },
-    deleteLayer(project: EngineProject, scene: string, name: string): void {
-      deleteLayer((project as FakeProject).state, scene, name);
-    },
-    createObject(project: EngineProject, input: CreateObjectInput): void {
-      createObject((project as FakeProject).state, input);
-    },
-    renameObject(project: EngineProject, scene: string | undefined, oldName: string, newName: string): void {
-      renameObject((project as FakeProject).state, scene, oldName, newName);
-    },
-    deleteObject(project: EngineProject, scene: string | undefined, name: string): void {
-      deleteObject((project as FakeProject).state, scene, name);
-    },
-    attachBehavior(project: EngineProject, input: AttachBehaviorInput): { name: string } {
-      return attachBehavior((project as FakeProject).state, input);
-    },
-    updateBehavior(project: EngineProject, input: UpdateBehaviorInput): void {
-      updateBehavior((project as FakeProject).state, input);
-    },
-    removeBehavior(project: EngineProject, input: RemoveBehaviorInput): void {
-      removeBehavior((project as FakeProject).state, input);
-    },
+    // Famille (a) : second adapter au seam SceneObjectPorts.
+    ...createFakeSceneObjectPorts(),
     placeInstance(project: EngineProject, input: PlaceInstanceInput): { instanceId: string } {
       return placeInstance((project as FakeProject).state, input);
     },

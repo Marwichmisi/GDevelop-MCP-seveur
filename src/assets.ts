@@ -1,9 +1,10 @@
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { z } from 'zod';
 import type { CommandDeps } from './commands.js';
 import { SUPPORTED_RESOURCE_KINDS, formatDiagnostics, isBlockingDiagnostic } from './engine.js';
 import { McpError, validationFailed } from './errors.js';
+import { runTransaction } from './transaction.js';
 import type {
   AssetDetails,
   AssetPackSummary,
@@ -351,12 +352,6 @@ interface ImportedEntry {
   as: string;
 }
 
-interface TrackedBinary {
-  path: string;
-  existed: boolean;
-  compensationPath: string | null;
-}
-
 /**
  * Import ciblé tout-ou-rien : snapshot mémoire global + compensation binaires,
  * gate baseline (sauf baseline déjà bloquante → refus comme le batch sans
@@ -456,170 +451,102 @@ export async function importAssetsIntoProject(
     }
   }
 
-  const snapshot = deps.engine.serializeProject(session.project);
-  const baseline = new Set(deps.engine.listDiagnostics(session.project).map((d) => `${d.type}::${d.message}`));
+  // Gate baseline avant la Transaction (message d'import préservé ; le module
+  // la revérifie à l'entrée avec la même issue).
   const baselineBlocking = deps.engine.listDiagnostics(session.project).filter(isBlockingDiagnostic);
   if (baselineBlocking.length > 0) {
     throw validationFailed(
       `Refusing import: project baseline has blocking errors (${formatDiagnostics(baselineBlocking)}). Nothing was imported.`,
     );
   }
-  const wasDirty = session.dirty;
-  const tracked: TrackedBinary[] = [];
   const projectDir = dirname(session.filePath);
 
-  const rollbackFiles = (): void => {
-    for (let i = tracked.length - 1; i >= 0; i -= 1) {
-      const file = tracked[i];
-      if (!file) continue;
-      try {
-        if (!file.existed) {
-          if (existsSync(file.path)) unlinkSync(file.path);
-        } else if (file.compensationPath !== null && existsSync(file.compensationPath)) {
-          writeFileSync(file.path, readFileSync(file.compensationPath));
-          unlinkSync(file.compensationPath);
-        }
-      } catch {
-        // Best effort : la restauration mémoire reste la garantie.
-      }
-    }
-  };
-  const restoreMemory = (): void => {
-    deps.engine.restoreProject(session.project, snapshot);
-    if (wasDirty) deps.store.markDirty(session.id);
-    else deps.store.clearDirty(session.id);
-  };
-  const undoEverything = (): void => {
-    rollbackFiles();
-    restoreMemory();
-  };
-
   try {
-    const imported: ImportedEntry[] = [];
-    const resources: string[] = [];
-    const assetVersions: { id: string; version: string }[] = [];
-    const taken = new Set(taken0);
+    return (
+      await runTransaction(deps, parsed.sessionId, async (ctx) => {
+        const imported: ImportedEntry[] = [];
+        const resources: string[] = [];
+        const assetVersions: { id: string; version: string }[] = [];
+        const taken = new Set(taken0);
 
-    for (let i = 0; i < detailsList.length; i += 1) {
-      const details = detailsList[i] as AssetDetails;
-      const entry = wanted[i] as { id: string; as?: string | undefined };
+        for (let i = 0; i < detailsList.length; i += 1) {
+          const details = detailsList[i] as AssetDetails;
+          const entry = wanted[i] as { id: string; as?: string | undefined };
 
-      for (const objectAsset of details.objectAssets) {
-        for (const res of objectAsset.resources ?? []) {
-          if (!(SUPPORTED_RESOURCE_KINDS as readonly string[]).includes(res.kind)) {
-            throw validationFailed(`Resource of kind "${res.kind}" is not supported. Nothing was imported.`);
-          }
-          const filename = decodedAssetFilename(res.file);
-          if (filename === '') throw validationFailed('Asset resource has an empty file name: refusing import.');
-          const assetsDir = join(projectDir, 'assets');
-          mkdirSync(assetsDir, { recursive: true });
-          const destination = join(assetsDir, basename(filename));
-          const relative = `assets/${basename(filename)}`;
-          const resourceName = res.name && res.name !== '' ? res.name : basename(filename, '.png');
+          for (const objectAsset of details.objectAssets) {
+            for (const res of objectAsset.resources ?? []) {
+              if (!(SUPPORTED_RESOURCE_KINDS as readonly string[]).includes(res.kind)) {
+                throw validationFailed(`Resource of kind "${res.kind}" is not supported. Nothing was imported.`);
+              }
+              const filename = decodedAssetFilename(res.file);
+              if (filename === '') throw validationFailed('Asset resource has an empty file name: refusing import.');
+              const assetsDir = join(projectDir, 'assets');
+              mkdirSync(assetsDir, { recursive: true });
+              const destination = join(assetsDir, basename(filename));
+              const relative = `assets/${basename(filename)}`;
+              const resourceName = res.name && res.name !== '' ? res.name : basename(filename, '.png');
 
-          const already = deps.engine.describeContent(session.project).resources.some((r) => r.name === resourceName);
-          if (already) {
-            if (!resources.includes(relative) && existsSync(destination)) resources.push(relative);
-            continue;
+              const already = deps.engine.describeContent(session.project).resources.some((r) => r.name === resourceName);
+              if (already) {
+                if (!resources.includes(relative) && existsSync(destination)) resources.push(relative);
+                continue;
+              }
+              let bytes: Uint8Array;
+              try {
+                bytes = await store.backend.downloadBinary(res.file);
+              } catch (error) {
+                throw assetUnavailable(error, `Asset CDN error while downloading ${res.file}.`);
+              }
+              ctx.declareFile(destination);
+              try {
+                writeFileSync(destination, bytes);
+              } catch (error) {
+                throw new McpError('io-error', `Cannot write asset binary at ${destination}.`, { cause: error });
+              }
+              deps.engine.importResource(session.project, { name: resourceName, kind: res.kind, file: relative });
+              resources.push(relative);
+            }
           }
-          let bytes: Uint8Array;
-          try {
-            bytes = await store.backend.downloadBinary(res.file);
-          } catch (error) {
-            throw assetUnavailable(error, `Asset CDN error while downloading ${res.file}.`);
+
+          for (let oaIndex = 0; oaIndex < details.objectAssets.length; oaIndex += 1) {
+            const objectAsset = details.objectAssets[oaIndex] as AssetDetails['objectAssets'][number];
+            const rawObject = objectAsset.object as Record<string, unknown>;
+            const type = typeof rawObject['type'] === 'string' ? (rawObject['type'] as string) : '';
+            const baseName =
+              typeof rawObject['name'] === 'string' && (rawObject['name'] as string) !== ''
+                ? (rawObject['name'] as string)
+                : details.objectAssets.length > 1
+                  ? `${details.name}_${oaIndex + 1}`
+                  : details.name;
+            if (type === '') throw validationFailed(`Asset "${details.name}" has no object type: refusing import.`);
+            // `as` ne vaut que pour un asset mono-objet ; en multi-objets chaque
+            // objet garde son nom (auto-renommé si collision).
+            const requested = details.objectAssets.length === 1 ? (entry.as ?? baseName) : baseName;
+            if (entry.as !== undefined && details.objectAssets.length === 1 && taken.has(requested)) {
+              throw validationFailed(
+                `Object "${requested}" already exists in ${parsed.scene === undefined ? 'project' : `scene "${parsed.scene}"`}.`,
+              );
+            }
+            const finalName =
+              details.objectAssets.length === 1 && entry.as !== undefined
+                ? requested
+                : uniqueObjectName(requested, (n) => taken.has(n));
+            deps.engine.installAssetObject(session.project, {
+              scene: parsed.scene,
+              type,
+              name: finalName,
+              serializedObject: rawObject,
+              assetStoreId: details.id,
+            });
+            taken.add(finalName);
+            imported.push({ id: details.id, name: baseName, as: finalName });
           }
-          let existed = false;
-          let compensation: string | null = null;
-          if (existsSync(destination)) {
-            existed = true;
-            compensation = `${destination}.asset-comp-${process.pid}-${Date.now()}`;
-            writeFileSync(compensation, readFileSync(destination));
-          }
-          tracked.push({ path: destination, existed, compensationPath: compensation });
-          try {
-            writeFileSync(destination, bytes);
-          } catch (error) {
-            throw new McpError('io-error', `Cannot write asset binary at ${destination}.`, { cause: error });
-          }
-          try {
-            deps.engine.importResource(session.project, { name: resourceName, kind: res.kind, file: relative });
-          } catch (error) {
-            throw error;
-          }
-          resources.push(relative);
+          assetVersions.push({ id: details.id, version: details.version });
         }
-      }
-
-      for (let oaIndex = 0; oaIndex < details.objectAssets.length; oaIndex += 1) {
-        const objectAsset = details.objectAssets[oaIndex] as AssetDetails['objectAssets'][number];
-        const rawObject = objectAsset.object as Record<string, unknown>;
-        const type = typeof rawObject['type'] === 'string' ? (rawObject['type'] as string) : '';
-        const baseName =
-          typeof rawObject['name'] === 'string' && (rawObject['name'] as string) !== ''
-            ? (rawObject['name'] as string)
-            : details.objectAssets.length > 1
-              ? `${details.name}_${oaIndex + 1}`
-              : details.name;
-        if (type === '') throw validationFailed(`Asset "${details.name}" has no object type: refusing import.`);
-        // `as` ne vaut que pour un asset mono-objet ; en multi-objets chaque
-        // objet garde son nom (auto-renommé si collision).
-        const requested = details.objectAssets.length === 1 ? (entry.as ?? baseName) : baseName;
-        if (entry.as !== undefined && details.objectAssets.length === 1 && taken.has(requested)) {
-          throw validationFailed(
-            `Object "${requested}" already exists in ${parsed.scene === undefined ? 'project' : `scene "${parsed.scene}"`}.`,
-          );
-        }
-        const finalName =
-          details.objectAssets.length === 1 && entry.as !== undefined
-            ? requested
-            : uniqueObjectName(requested, (n) => taken.has(n));
-        deps.engine.installAssetObject(session.project, {
-          scene: parsed.scene,
-          type,
-          name: finalName,
-          serializedObject: rawObject,
-          assetStoreId: details.id,
-        });
-        taken.add(finalName);
-        imported.push({ id: details.id, name: baseName, as: finalName });
-      }
-      assetVersions.push({ id: details.id, version: details.version });
-    }
-
-    deps.engine.updateBehaviorsSharedData(session.project);
-    try {
-      const serialized = deps.engine.serializeProject(session.project);
-      const reparsed = deps.engine.loadProjectFromJson(serialized, '');
-      reparsed.delete();
-    } catch (error) {
-      undoEverything();
-      throw new McpError('post-apply-failed', 'Import produced a project that no longer round-trips; everything was restored.', {
-        cause: error,
-      });
-    }
-    const newBlocking = deps.engine
-      .listDiagnostics(session.project)
-      .filter((d) => !baseline.has(`${d.type}::${d.message}`) && isBlockingDiagnostic(d));
-    if (newBlocking.length > 0) {
-      undoEverything();
-      throw new McpError(
-        'post-apply-failed',
-        `Import introduced blocking errors (${formatDiagnostics(newBlocking)}); everything was restored.`,
-      );
-    }
-    for (const file of tracked) {
-      if (file.compensationPath !== null && existsSync(file.compensationPath)) {
-        try {
-          unlinkSync(file.compensationPath);
-        } catch {
-          // Best effort.
-        }
-      }
-    }
-    deps.store.markDirty(session.id);
-    return { pack: pack.tag, packVersion: parsed.packVersion, imported, resources, assetVersions };
+        return { pack: pack.tag, packVersion: parsed.packVersion, imported, resources, assetVersions };
+      })
+    ).result;
   } catch (error) {
-    undoEverything();
     if (error instanceof McpError) throw error;
     throw new McpError('post-apply-failed', `Import failed (${error instanceof Error ? error.message : String(error)}); everything was restored.`, {
       cause: error,

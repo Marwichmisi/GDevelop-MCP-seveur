@@ -310,7 +310,8 @@ export const SUPPORTED_RESOURCE_KINDS = [
   'javascript',
 ] as const;
 
-export interface EnginePorts {
+/** Socle Session projet : cycle de vie, Snapshot, diagnostics, lecture. */
+export interface ProjectPorts {
   createProject(name: string): EngineProject;
   loadProjectFromJson(json: string, projectFile: string): EngineProject;
   serializeProject(project: EngineProject): string;
@@ -328,6 +329,10 @@ export interface EnginePorts {
   /** Charge les events-functions (2 passes metadata+codegen, i18n identité, tmp codeWriter). No-op si 0. */
   loadEventsFunctionsExtensions(project: EngineProject): void;
   unloadEventsFunctionsExtensions(project: EngineProject): void;
+}
+
+/** Famille (a) : scènes, calques, Objets, comportements (module sceneObjects). */
+export interface SceneObjectPorts {
   // --- Content (ticket #13). Every method validates everything before
   // mutating anything and throws `validation-failed` on refusal, so a
   // rejected call leaves the project untouched. ---
@@ -345,6 +350,10 @@ export interface EnginePorts {
   attachBehavior(project: EngineProject, input: AttachBehaviorInput): { name: string };
   updateBehavior(project: EngineProject, input: UpdateBehaviorInput): void;
   removeBehavior(project: EngineProject, input: RemoveBehaviorInput): void;
+}
+
+/** Famille (b) : Instances, variables, Groupe d'objets. */
+export interface InstanceVariablePorts {
   placeInstance(project: EngineProject, input: PlaceInstanceInput): { instanceId: string };
   updateInstance(project: EngineProject, scene: string, instanceId: string, patch: UpdateInstancePatch): void;
   removeInstance(project: EngineProject, scene: string, instanceId: string): void;
@@ -357,9 +366,17 @@ export interface EnginePorts {
   deleteGroup(project: EngineProject, scene: string | undefined, name: string): void;
   addObjectToGroup(project: EngineProject, scene: string | undefined, group: string, object: string): void;
   removeObjectFromGroup(project: EngineProject, scene: string | undefined, group: string, object: string): void;
+}
+
+/** Famille (d) : ressources et Import d'asset. */
+export interface ResourcePorts {
   importResource(project: EngineProject, input: ImportResourceInput): { name: string };
   removeResource(project: EngineProject, name: string): void;
   installAssetObject(project: EngineProject, input: InstallAssetObjectInput): void;
+}
+
+/** Famille (c) : Événement natif. */
+export interface NativeEventPorts {
   // --- Events (ticket #14). Every method validates everything before
   // mutating anything and throws `validation-failed` on refusal, so a
   // rejected call leaves the project untouched. Ids are stamped at creation
@@ -369,3 +386,15 @@ export interface EnginePorts {
   removeSceneEvent(project: EngineProject, input: RemoveEventInput): { removed: boolean; dryRun: boolean };
   validateSceneEvents(project: EngineProject, scene: string, events: EventNodeInput[]): { valid: boolean; errors: string[] };
 }
+
+/**
+ * Façade composite (chantier C1) : un seul seam pour les appelants
+ * (content.ts, events.ts, batch.ts, assets.ts, transaction.ts), assemblé
+ * des tranches ci-dessus. Les adapters (réel, fakes) composent par famille.
+ */
+export interface EnginePorts
+  extends ProjectPorts,
+    SceneObjectPorts,
+    InstanceVariablePorts,
+    ResourcePorts,
+    NativeEventPorts {}

@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, statSync, unlinkSync } from 'node:fs';
+import { copyFileSync, statSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { z } from 'zod';
 import { SUPPORTED_RESOURCE_KINDS } from './engine.js';
@@ -402,26 +402,19 @@ export function importResource(deps: CommandDeps, args: unknown): { name: string
   const destination = join(dirname(target), fileName);
   const name = parsed.name ?? fileName.replace(/\.[^.]*$/, '') ?? fileName;
   if (name === '') throw validationFailed(`Cannot derive a resource name from ${fileName}; pass name explicitly.`);
-  let copied = false;
-  try {
-    copyFileSync(source, destination);
-    copied = true;
-    return runMutation(deps.store, deps.engine, {
-      sessionId: parsed.sessionId,
-      schema: contentSchemas.importResource,
-      args,
-      apply: ({ project }) => deps.engine.importResource(project, { name, kind: parsed.kind, file: fileName }),
-    });
-  } catch (error) {
-    if (copied && existsSync(destination)) {
-      try {
-        unlinkSync(destination);
-      } catch {
-        // Best effort: the failed import must not leave a stray binary behind.
-      }
-    }
-    throw error;
-  }
+  // Copie DANS la Transaction : declareFile compense l'écrasement, y compris
+  // quand l'op rejoint une Transaction ambiante (batch).
+  return runMutation(deps.store, deps.engine, {
+    sessionId: parsed.sessionId,
+    schema: contentSchemas.importResource,
+    args,
+    apply: ({ project, declareFile }) => {
+      declareFile(destination);
+      copyFileSync(source, destination);
+      deps.engine.importResource(project, { name, kind: parsed.kind, file: fileName });
+      return { name };
+    },
+  });
 }
 
 export function removeResource(deps: CommandDeps, args: unknown): { name: string } {

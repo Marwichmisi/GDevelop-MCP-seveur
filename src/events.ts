@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { EventNodeInput } from './engine.js';
 import { validationFailed } from './errors.js';
 import { runMutation, type MutationContext } from './pipeline.js';
+import { runTransactionSync } from './transaction.js';
 import type { CommandDeps } from './commands.js';
 
 /**
@@ -168,23 +169,22 @@ function checkJsCodeMarker(events: EventNodeInput[]): void {
   visit(events);
 }
 
-/** dryRun wrapper: full pipeline, then memory restore + prior dirty flag restore. */
+/** dryRun : Transaction complète (gates inclus) puis restore mémoire + dirty. */
 function withDryRun<TArgs, TResult>(
   deps: CommandDeps,
   schema: z.ZodType<TArgs>,
   args: unknown,
   apply: (context: MutationContext<TArgs>) => TResult,
 ): TResult {
-  const session = deps.store.get((args as { sessionId: string }).sessionId);
-  const snapshot = deps.engine.serializeProject(session.project);
-  const wasDirty = session.dirty;
-  try {
-    return mutate(deps, schema, args, apply);
-  } finally {
-    deps.engine.restoreProject(session.project, snapshot);
-    if (wasDirty) deps.store.markDirty(session.id);
-    else deps.store.clearDirty(session.id);
-  }
+  return runTransactionSync(
+    deps,
+    (args as { sessionId: string }).sessionId,
+    (ctx) => {
+      const parsed = schema.parse(args) as TArgs;
+      return apply({ session: ctx.session, project: ctx.project, args: parsed, declareFile: ctx.declareFile });
+    },
+    { dryRun: true, allowInvalidBaseline: true },
+  ).result;
 }
 
 export function appendSceneEvents(
