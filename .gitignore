@@ -7,3 +7,4 @@ third-party/*
 *.bak-*
 *.tmp-*
 .env
+validation-mini-collector/

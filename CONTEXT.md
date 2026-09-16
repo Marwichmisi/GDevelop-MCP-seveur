@@ -63,3 +63,17 @@ _Avoid_: documentation, registre
 **Folder-project**:
 Projet stocké en dossier, scènes et extensions éclatées en fichiers avec références, chargé par unsplit.
 _Avoid_: projet dossier, split
+
+### Validation
+
+**Projet de validation**:
+Mini-jeu jetable qui exerce les tools sur une Session projet, sans intention de livraison.
+_Avoid_: mini jeu, démo, jeu produit
+
+**Couverture**:
+Table tool par tool avec statut et preuve via describe, render statique ou preview jouable.
+_Avoid_: coverage, test complet
+
+**Insuffisance**:
+Friction ou bug relevé pendant la validation et méritant un ticket 1.1.
+_Avoid_: amélioration vague, bug (tout court)
