@@ -118,8 +118,8 @@ export function createProjectTools(deps: CommandDeps): ToolDefinition[] {
     },
     {
       name: 'open_project',
-      description: 'Open an existing single-file .json project into a new session. Folder-projects are refused.',
-      inputSchema: { path: z.string().min(1).describe('Absolute path to the .json project file') },
+      description: 'Open an existing project into a new session: single-file .json or folder-project directory (unsplit + events-functions extensions loaded).',
+      inputSchema: { path: z.string().min(1).describe('Absolute path to the .json project file or folder-project directory') },
       handler: async (args) => text(openProject(deps, { path: args['path'] as string })),
     },
     {

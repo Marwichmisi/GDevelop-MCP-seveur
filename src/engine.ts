@@ -321,6 +321,13 @@ export interface EnginePorts {
   describeContent(project: EngineProject): ContentView;
   setProjectName(project: EngineProject, name: string): void;
   setProjectFile(project: EngineProject, path: string): void;
+  /** Folder-project (issue #19) : flag `properties.folderProject` + chargement extensions custom. */
+  isFolderProject(project: EngineProject): boolean;
+  setFolderProject(project: EngineProject, value: boolean): void;
+  getEventsFunctionsExtensionCount(project: EngineProject): number;
+  /** Charge les events-functions (2 passes metadata+codegen, i18n identité, tmp codeWriter). No-op si 0. */
+  loadEventsFunctionsExtensions(project: EngineProject): void;
+  unloadEventsFunctionsExtensions(project: EngineProject): void;
   // --- Content (ticket #13). Every method validates everything before
   // mutating anything and throws `validation-failed` on refusal, so a
   // rejected call leaves the project untouched. ---

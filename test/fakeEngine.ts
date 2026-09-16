@@ -67,6 +67,10 @@ export class FakeProject implements EngineProject {
   state: FakeContentState;
   deleted = false;
   failSerialize = false;
+  folderProject = false;
+  eventsFunctionsExtensionsCount = 0;
+  loadedExtensions = false;
+  unloadedExtensions = false;
 
   constructor(state: FakeContentState = blankContentState('')) {
     this.state = structuredClone(state);
@@ -81,7 +85,11 @@ function asArray(value: unknown): Record<string, unknown>[] {
   return Array.isArray(value) ? (value as Record<string, unknown>[]) : [];
 }
 
-function normalizeState(parsed: Record<string, unknown>, name: string): FakeContentState {
+function normalizeState(parsed: Record<string, unknown>, name: string): {
+  state: FakeContentState;
+  folderProject: boolean;
+  eventsFunctionsExtensionsCount: number;
+} {
   // Foreign files (saved by the real engine) carry extra keys and a nested
   // resources container; only the content-view shape is kept.
   const rawResources = parsed['resources'];
@@ -94,14 +102,25 @@ function normalizeState(parsed: Record<string, unknown>, name: string): FakeCont
       (layout as { events: unknown }).events = [];
     }
   }
+  const properties = parsed['properties'] as { folderProject?: unknown } | undefined;
+  const rawExtensions = parsed['eventsFunctionsExtensions'];
   return {
-    name: typeof parsed['name'] === 'string' ? (parsed['name'] as string) : name,
-    projectFile: typeof parsed['projectFile'] === 'string' ? (parsed['projectFile'] as string) : '',
-    layouts,
-    objects: asArray(parsed['objects']) as unknown as FakeContentState['objects'],
-    variables: asArray(parsed['variables']) as unknown as FakeContentState['variables'],
-    objectsGroups: asArray(parsed['objectsGroups']) as unknown as FakeContentState['objectsGroups'],
-    resources: (Array.isArray(resources) ? resources : []) as unknown as FakeContentState['resources'],
+    state: {
+      name:
+        typeof parsed['name'] === 'string'
+          ? (parsed['name'] as string)
+          : typeof properties === 'object' && properties !== null && typeof (properties as { name?: unknown }).name === 'string'
+            ? ((properties as { name?: unknown }).name as string)
+            : name,
+      projectFile: typeof parsed['projectFile'] === 'string' ? (parsed['projectFile'] as string) : '',
+      layouts,
+      objects: asArray(parsed['objects']) as unknown as FakeContentState['objects'],
+      variables: asArray(parsed['variables']) as unknown as FakeContentState['variables'],
+      objectsGroups: asArray(parsed['objectsGroups']) as unknown as FakeContentState['objectsGroups'],
+      resources: (Array.isArray(resources) ? resources : []) as unknown as FakeContentState['resources'],
+    },
+    folderProject: properties?.folderProject === true,
+    eventsFunctionsExtensionsCount: Array.isArray(rawExtensions) ? rawExtensions.length : 0,
   };
 }
 
@@ -134,14 +153,27 @@ export function createFakeEngine(
       if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
         throw new McpError('project-load-failed', 'Project file does not contain a project object.');
       }
-      const project = new FakeProject(normalizeState(parsed as Record<string, unknown>, ''));
+      const normalized = normalizeState(parsed as Record<string, unknown>, '');
+      const project = new FakeProject(normalized.state);
+      project.folderProject = normalized.folderProject;
+      project.eventsFunctionsExtensionsCount = normalized.eventsFunctionsExtensionsCount;
       projects.push(project);
       return project;
     },
     serializeProject(project: EngineProject): string {
       const fake = project as FakeProject;
       if (fake.failSerialize) throw new McpError('io-error', 'Fake serialization failure.');
-      return JSON.stringify(fake.state);
+      const raw = JSON.parse(JSON.stringify(fake.state)) as Record<string, unknown>;
+      if (fake.folderProject) {
+        raw['properties'] = { ...(raw['properties'] as Record<string, unknown> | undefined), folderProject: true };
+      }
+      if (fake.eventsFunctionsExtensionsCount > 0) {
+        raw['eventsFunctionsExtensions'] = Array.from(
+          { length: fake.eventsFunctionsExtensionsCount },
+          (_, i) => ({ name: `Ext${i}` }),
+        );
+      }
+      return JSON.stringify(raw);
     },
     restoreProject(project: EngineProject, snapshot: string): void {
       const fake = project as FakeProject;
@@ -288,6 +320,21 @@ export function createFakeEngine(
     },
     setProjectFile(project: EngineProject, path: string): void {
       (project as FakeProject).state.projectFile = path;
+    },
+    isFolderProject(project: EngineProject): boolean {
+      return (project as FakeProject).folderProject;
+    },
+    setFolderProject(project: EngineProject, value: boolean): void {
+      (project as FakeProject).folderProject = value;
+    },
+    getEventsFunctionsExtensionCount(project: EngineProject): number {
+      return (project as FakeProject).eventsFunctionsExtensionsCount;
+    },
+    loadEventsFunctionsExtensions(project: EngineProject): void {
+      (project as FakeProject).loadedExtensions = true;
+    },
+    unloadEventsFunctionsExtensions(project: EngineProject): void {
+      (project as FakeProject).unloadedExtensions = true;
     },
   };
   return engine;

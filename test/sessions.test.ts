@@ -37,13 +37,14 @@ describe('ProjectStore sessions', () => {
     assert.equal(session.dirty, false);
   });
 
-  it('refuses a folder-project with an explicit error', () => {
+  it('refuses a folder without game.json with an explicit error', () => {
     const dir = mkdtempSync(join(tmpdir(), 'gd-folder-'));
     mkdirSync(join(dir, 'layouts'));
     const store = makeStore();
     assert.throws(() => store.open(dir), (error: unknown) => {
-      return error instanceof McpError && error.code === 'folder-project-unsupported';
+      return error instanceof McpError && error.code === 'project-load-failed';
     });
+    assert.equal(store.list().length, 0);
   });
 
   it('refuses relative paths and null bytes', () => {

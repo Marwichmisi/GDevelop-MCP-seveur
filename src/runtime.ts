@@ -6,6 +6,11 @@ import { fileURLToPath } from 'node:url';
 import { McpError, validationFailed } from './errors.js';
 import { JSCODE_MARKER_COMMENT, hasJsCodeMarker } from './events.js';
 import {
+  loadProjectEventsFunctionsExtensionsSync,
+  makeNodeEventsFunctionCodeWriter,
+  unloadProjectEventsFunctionsExtensionsSync,
+} from './eventsFunctions.js';
+import {
   BLOCKING_DIAGNOSTIC_TYPES,
   shortBehaviorName,
   type AppendEventsInput,
@@ -316,6 +321,10 @@ interface GdProjectHandle extends EngineProject {
   getObjects(): GdObjectsContainer;
   getResourcesManager(): GdResourcesContainer;
   getVariables(): GdVariablesContainer;
+  isFolderProject(): boolean;
+  setFolderProject(value: boolean): void;
+  getEventsFunctionsExtensionsCount(): number;
+  getEventsFunctionsExtensionAt(index: number): unknown;
 }
 
 interface GdExtensionModule {
@@ -1516,6 +1525,33 @@ export function createRealEngine(gd: GdNamespace): EnginePorts {
     setProjectFile(project: EngineProject, path: string): void {
       (project as GdProjectHandle).setProjectFile(path);
     },
+    isFolderProject(project: EngineProject): boolean {
+      return (project as GdProjectHandle).isFolderProject();
+    },
+    setFolderProject(project: EngineProject, value: boolean): void {
+      (project as GdProjectHandle).setFolderProject(value);
+    },
+    getEventsFunctionsExtensionCount(project: EngineProject): number {
+      return (project as GdProjectHandle).getEventsFunctionsExtensionsCount();
+    },
+    loadEventsFunctionsExtensions(project: EngineProject): void {
+      const handle = project as GdProjectHandle;
+      if (handle.getEventsFunctionsExtensionsCount() === 0) return;
+      loadProjectEventsFunctionsExtensionsSync(
+        gd as unknown as Parameters<typeof loadProjectEventsFunctionsExtensionsSync>[0],
+        handle as unknown as Parameters<typeof loadProjectEventsFunctionsExtensionsSync>[1],
+        makeNodeEventsFunctionCodeWriter({ onWriteFile: () => {} }),
+        (text: string) => text,
+      );
+    },
+    unloadEventsFunctionsExtensions(project: EngineProject): void {
+      const handle = project as GdProjectHandle;
+      if (handle.getEventsFunctionsExtensionsCount() === 0) return;
+      unloadProjectEventsFunctionsExtensionsSync(
+        gd as unknown as Parameters<typeof unloadProjectEventsFunctionsExtensionsSync>[0],
+        handle as unknown as Parameters<typeof unloadProjectEventsFunctionsExtensionsSync>[1],
+      );
+    },
   };
 }
 
@@ -1528,6 +1564,8 @@ export interface LoadGdRuntimeOptions {
 export interface GdRuntime {
   gd: GdNamespace;
   engine: EnginePorts;
+  /** Charge les events-functions d'un projet (2 passes, i18n identité, tmp codeWriter). */
+  loadFolderExtensions(project: EngineProject): Promise<void>;
 }
 
 /** `initializePlatforms()` must run exactly once per process (static guard engine-side). */
@@ -1616,7 +1654,21 @@ export async function loadGdRuntime(options: LoadGdRuntimeOptions = {}): Promise
     platformsInitialized = true;
   }
   if (shouldLoadExtensions && gdjsRoot) loadJsExtensions(require, gd, gdjsRoot);
-  const runtime: GdRuntime = { gd, engine: createRealEngine(gd) };
+  const engine = createRealEngine(gd);
+  const runtime: GdRuntime = {
+    gd,
+    engine,
+    loadFolderExtensions: async (project: EngineProject): Promise<void> => {
+      const { loadProjectEventsFunctionsExtensions, makeLocalEventsFunctionCodeWriter } =
+        await import('./eventsFunctionsLoader.js');
+      await loadProjectEventsFunctionsExtensions(
+        gd as unknown as Parameters<typeof loadProjectEventsFunctionsExtensions>[0],
+        project as unknown as Parameters<typeof loadProjectEventsFunctionsExtensions>[1],
+        makeLocalEventsFunctionCodeWriter({ onWriteFile: () => {} }),
+        (text: string) => text,
+      );
+    },
+  };
   runtimeCache.set(cacheKey, runtime);
   return runtime;
 }

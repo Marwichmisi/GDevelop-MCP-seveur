@@ -1,8 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
-import { isAbsolute, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { McpError, unknownSession } from './errors.js';
 import type { EnginePorts, EngineProject } from './engine.js';
+import {
+  MAX_UNSPLIT_DEPTH,
+  REFERENCE_MAGIC_PROPERTY,
+  containsSplitReference,
+  isFolderProjectJson,
+  unsplitSync,
+} from './folderProject.js';
 
 /** A project session: a `gd.Project` living in memory, isolated until an explicit save. */
 export interface Session {
@@ -14,6 +21,8 @@ export interface Session {
   preRestorePath: string | null;
   /** Session lecture (exemple) : describe seul, save et mutations refusés. */
   readOnly: boolean;
+  /** Stratégie disque : `single` (mono-fichier) ou `folder` (dossier éclaté). */
+  kind: 'single' | 'folder';
 }
 
 export interface ProjectStoreOptions {
@@ -35,32 +44,118 @@ export class ProjectStore {
 
   create(name: string): Session {
     const project = this.engine.createProject(name);
-    const session: Session = { id: randomUUID(), project, filePath: null, dirty: false, preRestorePath: null, readOnly: false };
+    const kind = this.engine.isFolderProject(project) ? 'folder' : 'single';
+    const session: Session = { id: randomUUID(), project, filePath: null, dirty: false, preRestorePath: null, readOnly: false, kind };
     this.sessions.set(session.id, session);
     return session;
   }
 
   open(path: string): Session {
-    const absolute = this.resolvePath(path);    let stat;
+    const absolute = this.resolvePath(path);
+    let stat;
     try {
       stat = statSync(absolute);
     } catch (error) {
       throw new McpError('io-error', `Cannot open project at ${absolute}: file not found.`, { cause: error });
     }
+    let main: string;
     if (stat.isDirectory()) {
+      main = join(absolute, 'game.json');
+      try {
+        statSync(main);
+      } catch (error) {
+        throw new McpError('project-load-failed', `Folder-project at ${absolute} has no game.json.`, { cause: error });
+      }
+      // Containment déjà garantie par resolvePath sur le dossier ; re-valider le main.
+      this.resolvePath(main);
+    } else {
+      main = absolute;
+    }
+    let raw: string;
+    try {
+      raw = readFileSync(main, 'utf8');
+    } catch (error) {
+      throw new McpError('io-error', `Cannot read project file at ${main}.`, { cause: error });
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      throw new McpError('project-load-failed', 'Project file is not valid JSON.', { cause: error });
+    }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      throw new McpError('project-load-failed', 'Project file does not contain a project object.');
+    }
+    const folder = isFolderProjectJson(parsed) || containsSplitReference(parsed);
+    if (!folder) {
+      const project = this.engine.loadProjectFromJson(raw, main);
+      try {
+        this.engine.loadEventsFunctionsExtensions(project);
+      } catch (error) {
+        try {
+          project.delete();
+        } catch {
+          // Best effort.
+        }
+        throw new McpError('project-load-failed', `Project at ${main}: events-functions extensions failed to load.`, {
+          cause: error,
+        });
+      }
+      const session: Session = { id: randomUUID(), project, filePath: main, dirty: false, preRestorePath: null, readOnly: false, kind: 'single' };
+      this.sessions.set(session.id, session);
+      return session;
+    }
+    const dir = dirname(main);
+    const doc = parsed as Record<string, unknown>;
+    const properties = (doc['properties'] as Record<string, unknown> | undefined) ?? {};
+    doc['properties'] = { ...properties, projectFile: main };
+    try {
+      unsplitSync(doc, {
+        isReferenceMagicPropertyName: REFERENCE_MAGIC_PROPERTY,
+        maxUnsplitDepth: MAX_UNSPLIT_DEPTH,
+        getReferencePartialObjectSync: (reference: string) => {
+          if (reference.includes('..')) {
+            throw new Error(`Invalid reference ${reference}`);
+          }
+          const partialPath = join(dir, reference) + '.json';
+          const resolved = resolve(partialPath);
+          if (!resolved.startsWith(resolve(dir))) {
+            throw new Error(`Reference escapes project folder: ${reference}`);
+          }
+          const text = readFileSync(resolved, 'utf8');
+          return JSON.parse(text) as unknown;
+        },
+      });
+    } catch (error) {
+      if (error instanceof McpError) throw error;
       throw new McpError(
-        'folder-project-unsupported',
-        `Folder-project at ${absolute} is not supported yet (single-file .json only). It was left untouched.`,
+        'project-load-failed',
+        `Folder-project at ${main} could not be loaded: ${(error as Error).message}`,
+        { cause: error },
       );
     }
-    let json: string;
+    let project: EngineProject;
     try {
-      json = readFileSync(absolute, 'utf8');
+      project = this.engine.loadProjectFromJson(JSON.stringify(doc), main);
     } catch (error) {
-      throw new McpError('io-error', `Cannot read project file at ${absolute}.`, { cause: error });
+      if (error instanceof McpError) throw error;
+      throw new McpError('project-load-failed', `Folder-project at ${main} could not be loaded by the engine.`, {
+        cause: error,
+      });
     }
-    const project = this.engine.loadProjectFromJson(json, absolute);
-    const session: Session = { id: randomUUID(), project, filePath: absolute, dirty: false, preRestorePath: null, readOnly: false };
+    try {
+      this.engine.loadEventsFunctionsExtensions(project);
+    } catch (error) {
+      try {
+        project.delete();
+      } catch {
+        // Best effort.
+      }
+      throw new McpError('project-load-failed', `Folder-project at ${main}: events-functions extensions failed to load.`, {
+        cause: error,
+      });
+    }
+    const session: Session = { id: randomUUID(), project, filePath: main, dirty: false, preRestorePath: null, readOnly: false, kind: 'folder' };
     this.sessions.set(session.id, session);
     return session;
   }
@@ -71,7 +166,7 @@ export class ProjectStore {
    */
   openFromJson(json: string, label: string): Session {
     const project = this.engine.loadProjectFromJson(json, label);
-    const session: Session = { id: randomUUID(), project, filePath: null, dirty: false, preRestorePath: null, readOnly: true };
+    const session: Session = { id: randomUUID(), project, filePath: null, dirty: false, preRestorePath: null, readOnly: true, kind: 'single' };
     this.sessions.set(session.id, session);
     return session;
   }
@@ -92,6 +187,10 @@ export class ProjectStore {
 
   setFilePath(id: string, path: string): void {
     this.get(id).filePath = path;
+  }
+
+  setKind(id: string, kind: 'single' | 'folder'): void {
+    this.get(id).kind = kind;
   }
 
   clearDirty(id: string): void {
@@ -124,6 +223,11 @@ export class ProjectStore {
       );
     }
     this.sessions.delete(id);
+    try {
+      this.engine.unloadEventsFunctionsExtensions(session.project);
+    } catch {
+      // Best effort : le registre JsPlatform est global, un unload raté ne doit pas bloquer le close.
+    }
     session.project.delete();
   }
 

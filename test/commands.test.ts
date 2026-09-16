@@ -82,10 +82,10 @@ describe('project lifecycle commands', () => {
     }
   });
 
-  it('open refuses a folder-project without creating a session', () => {
+  it('open refuses a folder without game.json without creating a session', () => {
     const deps = makeDeps();
     assert.throws(() => openProject(deps, { path: tmpdir() }), (error: unknown) => {
-      return error instanceof McpError && error.code === 'folder-project-unsupported';
+      return error instanceof McpError && (error.code === 'project-load-failed' || error.code === 'io-error');
     });
     assert.equal(deps.store.list().length, 0);
   });
