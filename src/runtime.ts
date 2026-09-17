@@ -582,7 +582,8 @@ function checkEventInstruction(
   if (canonical === null) {
     throw validationFailed(
       `Unknown ${role} type "${instr.type}" (L1). Règle namespace : nom nu pour les extensions sans namespace ` +
-        `(VarScene), préfixé sinon (BuiltinCommonInstructions::CompareNumbers) ; les deux formes sont acceptées et normalisées.`,
+        `(VarScene), préfixé sinon (BuiltinCommonInstructions::CompareNumbers, TextObject::String) ; ` +
+        `les deux formes sont acceptées et normalisées quand elles ne sont pas ambiguës.`,
     );
   }
   const expected = instructionMetadata(gd, platform, canonical, role).parametersCount;

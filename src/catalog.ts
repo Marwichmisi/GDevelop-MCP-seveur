@@ -501,12 +501,28 @@ export async function describeInstructions(catalog: Catalog, args: unknown): Pro
 }> {
   const parsed = parseArgs(catalogSchemas.describeInstructions, args);
   const index = await catalog.index();
-  const matches = index.instructions.filter(
-    (entry) =>
-      entry.type === parsed.type &&
-      (parsed.kind === undefined || entry.kind === parsed.kind) &&
-      (parsed.extension === undefined || entry.extension === parsed.extension),
-  );
+  const matchesKindExtension = (entry: InstructionEntry): boolean =>
+    (parsed.kind === undefined || entry.kind === parsed.kind) &&
+    (parsed.extension === undefined || entry.extension === parsed.extension);
+  const matches = index.instructions.filter((entry) => entry.type === parsed.type && matchesKindExtension(entry));
+  // 1.1 #33 : le catalogue stocke le type nu (`String`, extension
+  // `TextObject`) mais le moteur exige la forme préfixée
+  // (`TextObject::String`). Résoudre la forme moteur vers l'entrée
+  // catalogue, sans changer le contrat (les entrées restent nues).
+  // Le nu ambigu (`String` seul) n'est jamais deviné : la forme préfixée
+  // est exigée (TextObject::String vs TextEntryObject::String).
+  if (matches.length === 0 && parsed.type.includes('::')) {
+    const separator = parsed.type.lastIndexOf('::');
+    const extension = parsed.type.slice(0, separator);
+    const suffix = parsed.type.slice(separator + 2);
+    if (extension !== '' && suffix !== '' && (parsed.extension === undefined || parsed.extension === extension)) {
+      matches.push(
+        ...index.instructions.filter(
+          (entry) => entry.type === suffix && entry.extension === extension && matchesKindExtension(entry),
+        ),
+      );
+    }
+  }
   const result: { pin: CatalogPin; type: string; found: boolean; matches: InstructionEntry[]; hint?: string | undefined } = {
     pin: index.pin,
     type: parsed.type,

@@ -596,12 +596,20 @@ export function removeResource(state: FakeContentState, name: string): void {
  *  `BuiltinCommonInstructions::CompareNumbers` / `::CompareStrings` /
  *  `::Once` préfixés. La résolution tolère l'autre forme et normalise vers
  *  le canonique, comme le vrai `MetadataProvider`. */
-const FAKE_ACTION_ARITY: Record<string, number> = { ModVarScene: 3 };
+const FAKE_ACTION_ARITY: Record<string, number> = {
+  ModVarScene: 3,
+  // 1.1 #33 : vrai nom moteur de l'action texte (prouvé live libGD
+  // 5.6.281 : 3 params [objet, opérateur, texte]). Le nu `String` reste
+  // refusé (ambigu TextObject vs TextEntryObject), comme le vrai moteur.
+  'TextObject::String': 3,
+};
 const FAKE_CONDITION_ARITY: Record<string, number> = {
   VarScene: 3,
   'BuiltinCommonInstructions::CompareNumbers': 3,
   'BuiltinCommonInstructions::CompareStrings': 3,
   'BuiltinCommonInstructions::Once': 0,
+  // 1.1 #33 : condition miroir (prouvée live : 3 params).
+  'TextObject::String': 3,
 };
 
 /** Miroir fake de `resolveInstructionType` (runtime.ts) : canonique ou null (L1). */
@@ -636,7 +644,8 @@ function checkFakeInstructions(
     if (canonical === null) {
       errors.push(
         `Unknown ${role} type "${instr.type}" (L1). Règle namespace : nom nu pour les extensions sans namespace ` +
-          `(VarScene), préfixé sinon (BuiltinCommonInstructions::CompareNumbers) ; les deux formes sont acceptées et normalisées.`,
+          `(VarScene), préfixé sinon (BuiltinCommonInstructions::CompareNumbers, TextObject::String) ; ` +
+          `les deux formes sont acceptées et normalisées quand elles ne sont pas ambiguës.`,
       );
       continue;
     }
