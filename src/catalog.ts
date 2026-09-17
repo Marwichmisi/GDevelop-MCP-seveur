@@ -129,8 +129,12 @@ export function describeCatalogFile(path: string): FileDescriptor | null {
  * moteur est le nom nu (`Sprite`, pas `Sprite::Sprite` ; `VarScene`, pas
  * `BuiltinVariables::VarScene`). Toutes les autres sont préfixées
  * (`TextObject::Text`, `DialogueTree::Hero`).
+ *
+ * 1.1 #32 : la validation L1 (`runtime.ts`) réutilise ce set pour ne
+ * dépouiller un type préfixé vers son suffixe nu que lorsque le préfixe
+ * est une extension sans namespace connue (pas de masquage de typo).
  */
-const NO_NAMESPACE_EXTENSIONS = new Set([
+export const NO_NAMESPACE_EXTENSIONS = new Set([
   'Sprite',
   'BuiltinObject',
   'BuiltinAudio',

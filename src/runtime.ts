@@ -4,6 +4,7 @@ import { existsSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { McpError, validationFailed } from './errors.js';
+import { NO_NAMESPACE_EXTENSIONS } from './catalog.js';
 import {
   checkObjectType,
   clampPosition,
@@ -507,6 +508,69 @@ const EVENT_TYPE_STRINGS: Record<EventNodeInput['kind'], string> = {
   jscode: 'BuiltinCommonInstructions::JsCode',
 };
 
+/**
+ * 1.1 #32 — Règle L1 namespace (le moteur juge, documentée ici).
+ *
+ * Canonique = nom exact exigé par `MetadataProvider` :
+ * - extensions sans namespace (BuiltinVariables, BuiltinKeyboard,
+ *   BuiltinMouse, BuiltinTime, BuiltinObject, Sprite, … — cf
+ *   `NO_NAMESPACE_EXTENSIONS` dans `catalog.ts`) → nom nu (`VarScene`,
+ *   `ModVarScene`, `KeyPressed`, …) ;
+ * - extension `BuiltinCommonInstructions` (à namespace) → nom préfixé
+ *   (`BuiltinCommonInstructions::CompareNumbers`, `::CompareStrings`,
+ *   `::Once`).
+ * Sondé live sur libGD 5.6.281 : `VarScene` nu valide mais
+ * `BuiltinVariables::VarScene` inconnu ; `CompareNumbers` nu inconnu mais
+ * `BuiltinCommonInstructions::CompareNumbers` valide (idem Once).
+ *
+ * Tolérance L1 : les deux formes sont acceptées et normalisées vers le
+ * canonique à l'écriture (`validate` accepte, `append` stocke le canonique).
+ */
+export const COMMON_INSTRUCTIONS_NAMESPACE = 'BuiltinCommonInstructions::';
+
+function instructionMetadata(
+  gd: GdNamespace,
+  platform: unknown,
+  type: string,
+  role: 'condition' | 'action' | 'while-condition',
+): { bad: boolean; parametersCount: number } {
+  const metadata =
+    role === 'action'
+      ? gd.MetadataProvider.getActionMetadata(platform, type)
+      : gd.MetadataProvider.getConditionMetadata(platform, type);
+  if (gd.MetadataProvider.isBadInstructionMetadata(metadata)) return { bad: true, parametersCount: -1 };
+  return { bad: false, parametersCount: metadata.getParametersCount() };
+}
+
+/** Résout un type d'instruction vers sa forme canonique moteur, ou `null` (L1). */
+export function resolveInstructionType(
+  gd: GdNamespace,
+  project: GdProjectHandle,
+  raw: string,
+  role: 'condition' | 'action' | 'while-condition',
+): string | null {
+  const platform = project.getCurrentPlatform();
+  // 1. Forme exacte d'abord (canonique, zéro surprise).
+  if (!instructionMetadata(gd, platform, raw, role).bad) return raw;
+  // 2. Forme préfixée tolérée vers nue, uniquement lorsque le préfixe est
+  // une extension sans namespace connue (`BuiltinVariables::VarScene` →
+  // `VarScene`). Tout autre préfixe reste un refus (typo non masquée).
+  const separator = raw.lastIndexOf('::');
+  if (separator > 0) {
+    const prefix = raw.slice(0, separator);
+    const suffix = raw.slice(separator + 2);
+    if (suffix !== '' && NO_NAMESPACE_EXTENSIONS.has(prefix) && !instructionMetadata(gd, platform, suffix, role).bad) {
+      return suffix;
+    }
+    return null;
+  }
+  // 3. Forme nue tolérée vers `BuiltinCommonInstructions::…`
+  // (`CompareNumbers` → `BuiltinCommonInstructions::CompareNumbers`).
+  const prefixed = `${COMMON_INSTRUCTIONS_NAMESPACE}${raw}`;
+  if (!instructionMetadata(gd, platform, prefixed, role).bad) return prefixed;
+  return null;
+}
+
 function checkEventInstruction(
   gd: GdNamespace,
   project: GdProjectHandle,
@@ -514,14 +578,14 @@ function checkEventInstruction(
   role: 'condition' | 'action' | 'while-condition',
 ): void {
   const platform = project.getCurrentPlatform();
-  const metadata =
-    role === 'action'
-      ? gd.MetadataProvider.getActionMetadata(platform, instr.type)
-      : gd.MetadataProvider.getConditionMetadata(platform, instr.type);
-  if (gd.MetadataProvider.isBadInstructionMetadata(metadata)) {
-    throw validationFailed(`Unknown ${role} type "${instr.type}" (L1).`);
+  const canonical = resolveInstructionType(gd, project, instr.type, role);
+  if (canonical === null) {
+    throw validationFailed(
+      `Unknown ${role} type "${instr.type}" (L1). Règle namespace : nom nu pour les extensions sans namespace ` +
+        `(VarScene), préfixé sinon (BuiltinCommonInstructions::CompareNumbers) ; les deux formes sont acceptées et normalisées.`,
+    );
   }
-  const expected = metadata.getParametersCount();
+  const expected = instructionMetadata(gd, platform, canonical, role).parametersCount;
   if (instr.parameters.length !== expected) {
     throw validationFailed(
       `Wrong arity for ${role} "${instr.type}": expected ${expected}, got ${instr.parameters.length} (L2).`,
@@ -581,10 +645,24 @@ function validateEventTree(gd: GdNamespace, project: GdProjectHandle, nodes: Eve
   visit(nodes, 'events');
 }
 
-function appendEventInstruction(gd: GdNamespace, list: GdInstructionsList, instr: EventInstructionInput): void {
+function appendEventInstruction(
+  gd: GdNamespace,
+  project: GdProjectHandle,
+  list: GdInstructionsList,
+  instr: EventInstructionInput,
+  role: 'condition' | 'action' | 'while-condition',
+): void {
+  // #32 : la validation a déjà résolu, mais l'écriture re-résout pour
+  // garantir le stockage canonique même en appel moteur direct. Un échec
+  // ici est inatteignable après `validateEventTree` : il signale un bug
+  // interne, jamais une entrée utilisateur (déjà refusée en L1).
+  const canonical = resolveInstructionType(gd, project, instr.type, role);
+  if (canonical === null) {
+    throw validationFailed(`Unknown ${role} type "${instr.type}" (L1). Refus interne après validation : incohérence.`);
+  }
   const handle = new gd.Instruction();
   try {
-    handle.setType(instr.type);
+    handle.setType(canonical);
     handle.setParametersCount(instr.parameters.length);
     instr.parameters.forEach((value, i) => handle.setParameter(i, value));
     if (instr.inverted === true) handle.setInverted(true);
@@ -610,8 +688,8 @@ function configureEventNode(
     standard: GdStandardEvent,
     source: { conditions?: EventInstructionInput[] | undefined; actions?: EventInstructionInput[] | undefined },
   ): void => {
-    for (const instr of source.conditions ?? []) appendEventInstruction(gd, standard.getConditions(), instr);
-    for (const instr of source.actions ?? []) appendEventInstruction(gd, standard.getActions(), instr);
+    for (const instr of source.conditions ?? []) appendEventInstruction(gd, project, standard.getConditions(), instr, 'condition');
+    for (const instr of source.actions ?? []) appendEventInstruction(gd, project, standard.getActions(), instr, 'action');
   };
   switch (node.kind) {
     case 'standard':
@@ -629,7 +707,7 @@ function configureEventNode(
     }
     case 'while': {
       const whileEvent = gd.asWhileEvent(base);
-      for (const instr of node.whileConditions) appendEventInstruction(gd, whileEvent.getWhileConditions(), instr);
+      for (const instr of node.whileConditions) appendEventInstruction(gd, project, whileEvent.getWhileConditions(), instr, 'while-condition');
       fillStandard(whileEvent, node);
       break;
     }

@@ -20,6 +20,8 @@ import type {
   VariableTarget,
 } from '../src/engine.js';
 import { SUPPORTED_RESOURCE_KINDS, shortBehaviorName } from '../src/engine.js';
+import { COMMON_INSTRUCTIONS_NAMESPACE } from '../src/runtime.js';
+import { NO_NAMESPACE_EXTENSIONS } from '../src/catalog.js';
 import { readContentView, toVariableNode, type JsonValue, type SerializedVariable } from '../src/contentView.js';
 
 export interface FakeEventState {
@@ -589,10 +591,39 @@ export function removeResource(state: FakeContentState, name: string): void {
 // --- Events (ticket #14, fake side of the engine seam) ---
 
 /** Minimal instruction catalog for the fake: mirrors the real arity for the
- *  two instructions the suites use (ModVarScene action / VarScene condition).
- *  Anything else is an L1 refusal, like MetadataProvider would report. */
+ *  instructions the suites use. Canoniques moteur (1.1 #32) : `VarScene` /
+ *  `ModVarScene` nus (extensions sans namespace),
+ *  `BuiltinCommonInstructions::CompareNumbers` / `::CompareStrings` /
+ *  `::Once` préfixés. La résolution tolère l'autre forme et normalise vers
+ *  le canonique, comme le vrai `MetadataProvider`. */
 const FAKE_ACTION_ARITY: Record<string, number> = { ModVarScene: 3 };
-const FAKE_CONDITION_ARITY: Record<string, number> = { VarScene: 3 };
+const FAKE_CONDITION_ARITY: Record<string, number> = {
+  VarScene: 3,
+  'BuiltinCommonInstructions::CompareNumbers': 3,
+  'BuiltinCommonInstructions::CompareStrings': 3,
+  'BuiltinCommonInstructions::Once': 0,
+};
+
+/** Miroir fake de `resolveInstructionType` (runtime.ts) : canonique ou null (L1). */
+function resolveFakeInstructionType(
+  raw: string,
+  role: 'condition' | 'action' | 'while-condition',
+): string | null {
+  const catalog = role === 'action' ? FAKE_ACTION_ARITY : FAKE_CONDITION_ARITY;
+  if (catalog[raw] !== undefined) return raw;
+  const separator = raw.lastIndexOf('::');
+  if (separator > 0) {
+    const prefix = raw.slice(0, separator);
+    const suffix = raw.slice(separator + 2);
+    if (suffix !== '' && NO_NAMESPACE_EXTENSIONS.has(prefix) && catalog[suffix] !== undefined) return suffix;
+    return null;
+  }
+  const prefixed = `${COMMON_INSTRUCTIONS_NAMESPACE}${raw}`;
+  if (catalog[prefixed] !== undefined) return prefixed;
+  // Suffixe nu d'une forme préfixée connue via l'autre rôle ? Non : les rôles
+  // ne se mélangent pas (VarScene n'est jamais une action).
+  return null;
+}
 
 function checkFakeInstructions(
   list: EventInstructionInput[] | undefined,
@@ -601,11 +632,15 @@ function checkFakeInstructions(
 ): void {
   for (const instr of list ?? []) {
     const catalog = role === 'action' ? FAKE_ACTION_ARITY : FAKE_CONDITION_ARITY;
-    const expected = catalog[instr.type];
-    if (expected === undefined) {
-      errors.push(`Unknown ${role} type "${instr.type}" (L1).`);
+    const canonical = resolveFakeInstructionType(instr.type, role);
+    if (canonical === null) {
+      errors.push(
+        `Unknown ${role} type "${instr.type}" (L1). Règle namespace : nom nu pour les extensions sans namespace ` +
+          `(VarScene), préfixé sinon (BuiltinCommonInstructions::CompareNumbers) ; les deux formes sont acceptées et normalisées.`,
+      );
       continue;
     }
+    const expected = catalog[canonical] as number;
     if (instr.parameters.length !== expected) {
       errors.push(
         `Wrong arity for ${role} "${instr.type}": expected ${expected}, got ${instr.parameters.length} (L2).`,
@@ -668,9 +703,12 @@ function throwOnEventErrors(nodes: EventNodeInput[]): void {
   if (errors.length > 0) throw validationFailed(`Invalid events: ${errors.join('; ')}`);
 }
 
-function toFakeInstruction(instr: EventInstructionInput): FakeEventState['conditions'][number] {
+function toFakeInstruction(
+  instr: EventInstructionInput,
+  role: 'condition' | 'action' | 'while-condition',
+): FakeEventState['conditions'][number] {
   return {
-    type: instr.type,
+    type: resolveFakeInstructionType(instr.type, role) ?? instr.type,
     parameters: [...instr.parameters],
     ...(instr.inverted !== undefined ? { inverted: instr.inverted } : {}),
     ...(instr.awaited !== undefined ? { awaited: instr.awaited } : {}),
@@ -686,8 +724,8 @@ function buildFakeEvent(node: EventNodeInput): FakeEventState {
     events: [],
   };
   if (node.kind === 'standard' || node.kind === 'else' || node.kind === 'repeat' || node.kind === 'while' || node.kind === 'foreach' || node.kind === 'foreachChildVariable') {
-    base.conditions = (node.conditions ?? []).map(toFakeInstruction);
-    base.actions = (node.actions ?? []).map(toFakeInstruction);
+    base.conditions = (node.conditions ?? []).map((instr) => toFakeInstruction(instr, 'condition'));
+    base.actions = (node.actions ?? []).map((instr) => toFakeInstruction(instr, 'action'));
     base.events = (node.events ?? []).map(buildFakeEvent);
     if (node.disabled !== undefined) base.disabled = node.disabled;
   }
@@ -697,7 +735,7 @@ function buildFakeEvent(node: EventNodeInput): FakeEventState {
       if (node.loopIndexVariable !== undefined) base.loopIndexVariable = node.loopIndexVariable;
       break;
     case 'while':
-      base.whileConditions = node.whileConditions.map(toFakeInstruction);
+      base.whileConditions = node.whileConditions.map((instr) => toFakeInstruction(instr, 'while-condition'));
       break;
     case 'foreach':
       base.object = node.object;

@@ -283,7 +283,7 @@ export function createEventTools(deps: CommandDeps): ToolDefinition[] {
   return [
     eventTool(
       'append_scene_events',
-      'Append a recursive native-event tree (Standard, Else, Repeat, While, ForEach, Group, Comment, Link, JsCode-marker) with L1+L2 validation.',
+      'Append a recursive native-event tree (Standard, Else, Repeat, While, ForEach, Group, Comment, Link, JsCode-marker) with L1+L2 validation. L1 namespace rule: bare name for no-namespace extensions (VarScene), prefixed otherwise (BuiltinCommonInstructions::CompareNumbers); both forms accepted and normalized to canonical.',
       'appendSceneEvents',
       appendSceneEvents,
       deps,
@@ -305,7 +305,7 @@ export function createEventTools(deps: CommandDeps): ToolDefinition[] {
     ),
     eventTool(
       'validate_scene_events',
-      'Validate an event tree without mutation (L1+L2 + JsCode marker).',
+      'Validate an event tree without mutation (L1+L2 + JsCode marker). L1 namespace rule: bare name for no-namespace extensions (VarScene), prefixed otherwise (BuiltinCommonInstructions::CompareNumbers); both forms accepted.',
       'validateSceneEvents',
       validateSceneEvents,
       deps,
