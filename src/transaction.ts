@@ -68,8 +68,8 @@ interface Ambient {
 /** Transactions ambiantes par session : un appel rejoint au lieu d'imbriquer. */
 const ambientBySession = new Map<string, Ambient>();
 
-function diagnosticKey(diagnostic: { type: string; message: string }): string {
-  return `${diagnostic.type}::${diagnostic.message}`;
+function diagnosticKey(diagnostic: { type: string; message: string; scene?: string | undefined }): string {
+  return `${diagnostic.scene ?? ''}::${diagnostic.type}::${diagnostic.message}`;
 }
 
 function isThenable(value: unknown): value is Promise<unknown> {

@@ -33,15 +33,23 @@ export type BlockingDiagnosticType = (typeof BLOCKING_DIAGNOSTIC_TYPES)[number];
 export interface EngineDiagnostic {
   type: string;
   message: string;
+  /** Nom de la scène porteuse (rapport moteur à deux niveaux, #35). Optionnel pour compatibilité. */
+  scene?: string | undefined;
 }
 
 export function isBlockingDiagnostic(diagnostic: EngineDiagnostic): boolean {
   return (BLOCKING_DIAGNOSTIC_TYPES as readonly string[]).includes(diagnostic.type);
 }
 
-/** "Type: message; …" rendering shared by the pipeline and save gates. */
+/** "[Scene] Type: message; …" rendering shared by the pipeline and save gates. */
 export function formatDiagnostics(diagnostics: EngineDiagnostic[]): string {
-  return diagnostics.map((diagnostic) => `${diagnostic.type}: ${diagnostic.message}`).join('; ');
+  return diagnostics
+    .map((diagnostic) =>
+      diagnostic.scene !== undefined && diagnostic.scene !== ''
+        ? `[${diagnostic.scene}] ${diagnostic.type}: ${diagnostic.message}`
+        : `${diagnostic.type}: ${diagnostic.message}`,
+    )
+    .join('; ');
 }
 
 export interface ProjectSummary {

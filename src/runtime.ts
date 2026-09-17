@@ -58,9 +58,12 @@ import {
  * Real libGD.js adapter. Verified against the S3 prebuilt 5.6.281-0 build:
  * CJS initializer, `await init({ locateFile })`, `initializePlatforms()` once
  * per process, `Serializer.toJSON/fromJSObject`, diagnostics via
- * `WholeProjectDiagnosticReport.count/get(i)` with numeric
- * `ProjectDiagnostic.getType()` mapped through the `_emscripten_enum_*`
- * bindings (0..3 = the four blocking types).
+ * `WholeProjectDiagnosticReport.count/get(i)` à deux niveaux
+ * (#35 : chaque `get(i)` est un rapport de scène
+ * `getSceneName/count/get(j)` portant les vrais `ProjectDiagnostic`
+ * `getType()/getMessage()`, mappés via les bindings `_emscripten_enum_*`
+ * 0..3 = the four blocking types ; un rapport non vide — y compris un
+ * sous-rapport vide transitoire post-export — ne doit jamais lever).
  *
  * The structural types below cover only the surface the scaffold needs. They
  * will be replaced by the generated `gd.d.ts` once provisioning pins a build
@@ -71,14 +74,20 @@ interface GdSerializerElement {
   delete(): void;
 }
 
-interface GdDiagnostic {
+interface GdProjectDiagnostic {
   getType(): number;
   getMessage(): string;
 }
 
-interface GdDiagnosticReport {
+interface GdSceneDiagnosticReport {
+  getSceneName(): string;
   count(): number;
-  get(index: number): GdDiagnostic;
+  get(index: number): GdProjectDiagnostic;
+}
+
+interface GdWholeProjectDiagnosticReport {
+  count(): number;
+  get(index: number): GdSceneDiagnosticReport;
   delete(): void;
 }
 
@@ -314,7 +323,7 @@ export interface GdProjectHandle extends EngineProject {
   serializeTo(element: GdSerializerElement): void;
   unserializeFrom(element: GdSerializerElement): void;
   updateBehaviorsSharedData(): void;
-  getWholeProjectDiagnosticReport(): GdDiagnosticReport;
+  getWholeProjectDiagnosticReport(): GdWholeProjectDiagnosticReport;
   setProjectFile(path: string): void;
   getProjectFile(): string;
   setName(name: string): void;
@@ -400,6 +409,49 @@ function readDiagnosticTypeName(gd: GdNamespace, numericType: number): string {
     if (value === numericType) return name;
   }
   return `UnknownDiagnosticType(${numericType})`;
+}
+
+/** #35 — lectures défensives : le moteur ne doit jamais faire lever TypeError. */
+function isProjectDiagnostic(value: unknown): boolean {
+  if (value === null || typeof value !== 'object') return false;
+  const record = value as Record<string, unknown>;
+  return typeof record['getType'] === 'function' && typeof record['getMessage'] === 'function';
+}
+
+function safeDiagnosticType(diagnostic: GdProjectDiagnostic): number {
+  try {
+    const value = diagnostic.getType();
+    return typeof value === 'number' ? value : Number.NaN;
+  } catch {
+    return Number.NaN;
+  }
+}
+
+function safeDiagnosticMessage(diagnostic: GdProjectDiagnostic): string {
+  try {
+    const value = diagnostic.getMessage();
+    return typeof value === 'string' ? value : String(value ?? '');
+  } catch {
+    return '';
+  }
+}
+
+function safeSceneName(sceneReport: Partial<GdSceneDiagnosticReport>): string | undefined {
+  try {
+    const value = sceneReport.getSceneName?.();
+    return typeof value === 'string' && value !== '' ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function safeCount(sceneReport: Partial<GdSceneDiagnosticReport>): number {
+  try {
+    const value = sceneReport.count?.();
+    return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : 0;
+  } catch {
+    return 0;
+  }
 }
 
 /** An instance may point at a scene object or a global one. */
@@ -883,9 +935,50 @@ export function createRealEngine(gd: GdNamespace): EnginePorts {
       const report = (project as GdProjectHandle).getWholeProjectDiagnosticReport();
       try {
         const found: EngineDiagnostic[] = [];
-        for (let i = 0; i < report.count(); i++) {
-          const diagnostic = report.get(i);
-          found.push({ type: readDiagnosticTypeName(gd, diagnostic.getType()), message: diagnostic.getMessage() });
+        let sceneCount = 0;
+        try {
+          sceneCount = typeof report.count === 'function' ? report.count() : 0;
+          if (typeof sceneCount !== 'number' || !Number.isInteger(sceneCount) || sceneCount < 0) sceneCount = 0;
+        } catch {
+          return found;
+        }
+        for (let i = 0; i < sceneCount; i++) {
+          let entry: unknown;
+          try {
+            entry = report.get(i) as unknown;
+          } catch {
+            continue;
+          }
+          if (entry === null || typeof entry !== 'object') continue;
+          // Forme historique plate (un diagnostic direct) : tolérée par
+          // défense, jamais produite par le moteur actuel.
+          if (isProjectDiagnostic(entry)) {
+            const flat = entry as GdProjectDiagnostic;
+            found.push({ type: readDiagnosticTypeName(gd, safeDiagnosticType(flat)), message: safeDiagnosticMessage(flat) });
+            continue;
+          }
+          // Forme réelle à deux niveaux (#35) : rapport de scène.
+          const record = entry as Record<string, unknown>;
+          if (typeof record['count'] !== 'function' || typeof record['get'] !== 'function') continue;
+          const sceneReport = record as unknown as Partial<GdSceneDiagnosticReport>;
+          const scene =
+            typeof sceneReport.getSceneName === 'function' ? safeSceneName(sceneReport) : undefined;
+          const diagCount = safeCount(sceneReport);
+          for (let j = 0; j < diagCount; j++) {
+            let raw: unknown;
+            try {
+              raw = (sceneReport.get as (index: number) => unknown)(j);
+            } catch {
+              continue;
+            }
+            if (raw === null || typeof raw !== 'object' || !isProjectDiagnostic(raw)) continue;
+            const diag = raw as GdProjectDiagnostic;
+            found.push({
+              type: readDiagnosticTypeName(gd, safeDiagnosticType(diag)),
+              message: safeDiagnosticMessage(diag),
+              ...(scene !== undefined ? { scene } : {}),
+            });
+          }
         }
         return found;
       } finally {
