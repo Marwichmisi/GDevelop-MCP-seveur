@@ -1,6 +1,6 @@
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, normalize, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { McpError } from './errors.js';
 import type { EngineProject } from './engine.js';
@@ -41,11 +41,39 @@ export function resolveGdjsRoot(): string {
   return process.env['GDEVELOP_GDJS_ROOT'] ?? defaultGdjsRoot();
 }
 
+export interface NodeFileSystemOptions {
+  /**
+   * 1.1 #34 : dossiers où l'exporteur Preview peut écrire (défaut :
+   * `tempDirectory`). Les lectures (`readFile`, `readDir`, `fileExists`,
+   * `dirExists`, sources des `copyFile`) restent non confinées —
+   * l'export lit les ressources depuis le dossier projet et le runtime
+   * GDJS. Toute écriture hors périmètre (dossier projet, racine GDJS,
+   * URL, `clearDir` destructeur) est refusée (`false`) sans effet disque,
+   * pour un contrat mémoire+tmp strict.
+   */
+  allowedWriteDirs?: string[] | undefined;
+}
+
+/** Une écriture vers une URL n'a aucun sens local : toujours refusée. */
+function isWriteAllowed(target: string, allowed: string[]): boolean {
+  if (isUrl(target)) return false;
+  const resolved = resolve(target);
+  return allowed.some((dir) => resolved === dir || resolved.startsWith(dir + sep));
+}
+
 /** JS implementation of the abstract WASM filesystem (forward-slash contract). */
-export function createNodeFileSystem(gd: GdLike, tempDirectory: string): { handle: { delete(): void } } {
+export function createNodeFileSystem(
+  gd: GdLike,
+  tempDirectory: string,
+  options: NodeFileSystemOptions = {},
+): { handle: { delete(): void } } {
+  const allowed = (options.allowedWriteDirs ?? [tempDirectory || tmpdir()]).map((dir) => resolve(dir));
   const implementation = {
     mkDir(directory: string): boolean {
+      // Passthrough URL historique (no-op sans effet disque) ; le
+      // confinement 1.1 #34 ne porte que sur les chemins locaux.
       if (isUrl(directory)) return true;
+      if (!isWriteAllowed(directory, allowed)) return false;
       mkdirSync(directory, { recursive: true });
       return true;
     },
@@ -58,6 +86,8 @@ export function createNodeFileSystem(gd: GdLike, tempDirectory: string): { handl
       }
     },
     clearDir(directory: string): boolean {
+      // 1.1 #34 : jamais de rm récursif hors dossier temporaire.
+      if (!isWriteAllowed(directory, allowed)) return false;
       rmSync(directory, { recursive: true, force: true });
       mkdirSync(directory, { recursive: true });
       return true;
@@ -85,11 +115,18 @@ export function createNodeFileSystem(gd: GdLike, tempDirectory: string): { handl
     },
     copyFile(source: string, destination: string): boolean {
       if (isUrl(source)) return true;
+      // 1.1 #34 : seule la destination est confinée — la source se lit
+      // depuis le dossier projet ou le runtime GDJS.
+      if (!isWriteAllowed(destination, allowed)) return false;
       mkdirSync(dirname(destination), { recursive: true });
       if (resolve(source) !== resolve(destination)) copyFileSync(source, destination);
       return true;
     },
     writeToFile(filename: string, contents: string): boolean {
+      // 1.1 #34 : refus sans effet disque hors dossier temporaire
+      // (couvrait aussi les destinations URL qui créaient des dossiers
+      // parasites `https:/…` dans le cwd via mkdirSync).
+      if (!isWriteAllowed(filename, allowed)) return false;
       mkdirSync(dirname(filename), { recursive: true });
       writeFileSync(filename, contents);
       return true;
@@ -133,7 +170,9 @@ export class GdPreviewExporter implements PreviewExporter {
         `GDJS runtime not found at ${this.gdjsRoot}. Set GDEVELOP_GDJS_ROOT to a built GDJS tree.`,
       );
     }
-    const { handle: fileSystem } = createNodeFileSystem(this.gd, outDir);
+    // 1.1 #34 : l'export n'écrit que dans outDir — le dossier projet et
+    // tout le reste du disque sont interdits en écriture au FS injecté.
+    const { handle: fileSystem } = createNodeFileSystem(this.gd, outDir, { allowedWriteDirs: [outDir] });
     const exporter = new this.gd.Exporter(fileSystem, resolve(this.gdjsRoot));
     const options = new this.gd.PreviewExportOptions(project, outDir);
     const call = (name: string, ...args: never[]): void => {

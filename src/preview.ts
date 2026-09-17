@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, sep } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import { z } from 'zod';
 import type { CommandDeps } from './commands.js';
 import type { EngineProject } from './engine.js';
@@ -275,6 +275,11 @@ export class PreviewManager {
     }
 
     const outDir = await mkdtemp(join(this.tmpRoot + sep, 'preview-'));
+    // 1.1 #34 : le dossier d'export légitime peut se trouver dans le
+    // dossier projet (suites existantes avec `tmpRoot: dir`) — il est
+    // exclu du gel, pas le reste.
+    const excluded = excludedExportPrefixes(session.filePath, outDir);
+    const beforeDir = snapshotProjectDir(session.filePath, excluded);
     const previewId = randomUUID();
     let server: StaticPreviewServer | null = null;
     try {
@@ -294,6 +299,10 @@ export class PreviewManager {
         `[export] scene "${scene}" exported`,
         ...(sanitizedDraco ? ['[export] draco wasm companion removed from index.html'] : []),
       ];
+      // 1.1 #34 : mémoire+tmp strict — vérifié avant d'enregistrer le
+      // Preview (le catch nettoie serveur, outDir et intrus dossier).
+      this.assertDirUntouched(session.filePath, beforeDir, excluded);
+      this.assertUntouched(session.filePath, beforeMtime);
       const record: ManagedPreview = {
         previewId,
         sessionId: parsed.sessionId,
@@ -312,9 +321,9 @@ export class PreviewManager {
       };
       this.previews.set(previewId, record);
       this.refreshTtl(record);
-      this.assertUntouched(session.filePath, beforeMtime);
       return this.toRecord(record);
     } catch (error) {
+      this.cleanupLeakedFiles(session.filePath, beforeDir, excluded);
       if (server) await server.close().catch(() => undefined);
       await rm(outDir, { recursive: true, force: true }).catch(() => undefined);
       if (error instanceof McpError) throw error;
@@ -378,6 +387,140 @@ export class PreviewManager {
       throw new McpError('preview-export-failed', 'Preview build touched the project file on disk; expected memory-only.');
     }
   }
+
+  /**
+   * 1.1 #34 : le garde-fou fichier ne suffit pas (assets/, .autosave à
+   * côté du projet en #27). Tout le dossier projet est gelé pendant
+   * l'export : le moindre fichier nouveau, supprimé ou modifié hors outDir
+   * refuse le build (le catch nettoie les intrus puis propage).
+   */
+  private assertDirUntouched(filePath: string | null, before: ProjectDirSnapshot | null, excluded: string[]): void {
+    if (filePath === null || before === null) return;
+    const leaked = diffProjectDir(filePath, before, excluded);
+    if (leaked.length > 0) {
+      const shown = leaked.slice(0, 8).join(', ');
+      throw new McpError(
+        'preview-export-failed',
+        `Preview build wrote outside its tmp folder (${shown}${leaked.length > 8 ? ', …' : ''}); ` +
+          'the project folder was cleaned up and the build refused — expected memory-only export.',
+      );
+    }
+  }
+
+  /** Supprime les fichiers/dossiers apparus pendant l'export (best effort, jamais de throw). */
+  private cleanupLeakedFiles(filePath: string | null, before: ProjectDirSnapshot | null, excluded: string[]): void {
+    if (filePath === null || before === null) return;
+    const dir = dirname(filePath);
+    const after = snapshotProjectDir(filePath, excluded);
+    if (after === null) return;
+    const freshFiles: string[] = [];
+    const freshDirs: string[] = [];
+    for (const rel of after.keys()) {
+      if (!before.has(rel)) {
+        if (rel.endsWith('/')) freshDirs.push(rel);
+        else freshFiles.push(rel);
+      }
+    }
+    for (const rel of freshFiles) {
+      try {
+        rmSync(join(dir, rel));
+      } catch {
+        // Best effort : le refus prime, le nettoyage est opportuniste.
+      }
+    }
+    freshDirs.sort((a, b) => b.length - a.length);
+    for (const rel of freshDirs) {
+      try {
+        rmSync(join(dir, rel), { recursive: true });
+      } catch {
+        // Best effort.
+      }
+    }
+  }
+}
+
+/** Snapshot du dossier projet (chemins relatifs -> taille + mtime), ou null sans fichier. */
+type ProjectDirSnapshot = Map<string, string>;
+
+/**
+ * 1.1 #34 : le dossier d'export légitime (outDir, sous tmpRoot) peut se
+ * trouver dans le dossier projet — seul ce sous-arbre est exclu du gel,
+ * jamais le reste. Préfixes relatifs ('' = tout le dossier, quand outDir
+ * est le dossier projet lui-même).
+ */
+function excludedExportPrefixes(filePath: string | null, outDir: string): string[] {
+  if (filePath === null) return [];
+  const dir = dirname(filePath);
+  const rel = relative(dir, outDir);
+  if (rel === '') return [''];
+  if (rel.startsWith('..') || rel.startsWith('/')) return [];
+  return [rel.split(sep).join('/') + '/'];
+}
+
+function snapshotProjectDir(filePath: string | null, excluded: string[] = []): ProjectDirSnapshot | null {
+  if (filePath === null) return null;
+  const dir = dirname(filePath);
+  try {
+    if (!statSync(dir).isDirectory()) return null;
+  } catch {
+    return null;
+  }
+  const found: ProjectDirSnapshot = new Map();
+  const base = filePath.split(sep).pop() ?? '';
+  const isExcluded = (rel: string): boolean => excluded.some((prefix) => rel === prefix || rel.startsWith(prefix));
+  const walk = (current: string, prefix: string): void => {
+    let entries;
+    try {
+      entries = readdirSync(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const rel = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
+      if (isSaveSidecar(rel, base) || isExcluded(rel)) continue;
+      const full = join(current, entry.name);
+      if (entry.isDirectory()) {
+        found.set(`${rel}/`, 'dir');
+        walk(full, rel);
+      } else if (entry.isFile()) {
+        try {
+          const stat = statSync(full);
+          found.set(rel, `file:${stat.size}:${stat.mtimeMs}`);
+        } catch {
+          found.set(rel, 'unreadable');
+        }
+      } else {
+        found.set(rel, 'other');
+      }
+    }
+  };
+  walk(dir, '');
+  return found;
+}
+
+/**
+ * Fichiers/dossiers que notre propre save atomique peut créer pendant un
+ * build concurrent (commands.ts : `.bak-<ISO>`, `.pre-restore-<ISO>`,
+ * `.tmp-<pid>-<uuid>`) : ni des fuites d'export, ni à nettoyer.
+ */
+function isSaveSidecar(rel: string, base: string): boolean {
+  if (base === '') return false;
+  return rel
+    .split('/')
+    .some((segment) => segment.startsWith(`${base}.bak-`) || segment.startsWith(`${base}.pre-restore-`) || segment.startsWith(`${base}.tmp-`));
+}
+
+/** Chemins nouveaux, supprimés ou modifiés depuis le snapshot (triés, relatifs). */
+function diffProjectDir(filePath: string, before: ProjectDirSnapshot, excluded: string[] = []): string[] {
+  const after = snapshotProjectDir(filePath, excluded) ?? new Map<string, string>();
+  const leaked: string[] = [];
+  for (const [rel, signature] of after) {
+    if (!before.has(rel) || before.get(rel) !== signature) leaked.push(rel);
+  }
+  for (const rel of before.keys()) {
+    if (!after.has(rel)) leaked.push(`${rel} (deleted)`);
+  }
+  return leaked.sort();
 }
 
 function projectFileSignature(filePath: string | null): string | null {
