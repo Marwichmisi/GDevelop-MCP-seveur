@@ -100,4 +100,153 @@ describe('catalogue parsers (ticket #15)', () => {
     assert.equal(classifyReceiver(undefined), 'unknown');
     assert.equal(classifyReceiver('foo'), 'unknown');
   });
+
+  it('1.1 #31: parses C++ AddObject<T> template declarations (Sprite, Text)', () => {
+    const source = `
+namespace gd {
+void ImplementsSpriteExtension(gd::PlatformExtension& extension) {
+  extension.SetExtensionInformation("Sprite", "Sprite", "Sprites.", "Florian", "MIT");
+  gd::ObjectMetadata& obj =
+      extension
+          .AddObject<SpriteObject>("Sprite",
+                                   _("Sprite"),
+                                   _("Animated object."),
+                                   "CppPlatform/Extensions/spriteicon.png");
+}
+void DeclareTextObjectExtension(gd::PlatformExtension& extension) {
+  extension.SetExtensionInformation("TextObject", "Text object", "Text.", "Florian", "MIT");
+  gd::ObjectMetadata& obj =
+      extension
+          .AddObject<TextObject>("Text",
+                                 _("Text"),
+                                 _("Displays text."),
+                                 "CppPlatform/Extensions/texticon.png");
+}
+}  // namespace gd
+`;
+    const parsed = parseExtensionSource(source);
+    const names = parsed.typeDeclarations.map((entry) => entry.name).sort();
+    assert.deepEqual(names, ['Sprite', 'Text']);
+    assert.ok(parsed.typeDeclarations.every((entry) => entry.kind === 'object'));
+  });
+
+  it('1.1 #31: exposes real engine arity for UseStandardRelationalOperatorParameters (VarScene x3)', () => {
+    const source = `
+namespace gd {
+void ImplementsVariablesExtension(gd::PlatformExtension& extension) {
+  extension.SetExtensionInformation("BuiltinVariables", "Variables", "Vars.", "Florian", "MIT");
+  extension
+      .AddCondition("VarScene",
+                    _("Number variable"),
+                    _("Compare the number value of a scene variable."),
+                    _("The number of scene variable _PARAM0_"),
+                    _("Scene variables"),
+                    "res/conditions/var24.png",
+                    "res/conditions/var.png")
+      .AddParameter("scenevar", _("Variable"))
+      .UseStandardRelationalOperatorParameters(
+          "number", ParameterOptions::MakeNewOptions());
+}
+}  // namespace gd
+`;
+    const parsed = parseExtensionSource(source);
+    const cond = parsed.instructions.find((entry) => entry.type === 'VarScene');
+    assert.ok(cond);
+    assert.deepEqual(
+      cond.parameters.map((parameter) => parameter.type),
+      ['scenevar', 'relationalOperator', 'number'],
+    );
+  });
+
+  it('1.1 #31: exposes real engine arity for UseStandardOperatorParameters (ModVarScene x3)', () => {
+    const source = `
+namespace gd {
+void ImplementsVariablesExtension(gd::PlatformExtension& extension) {
+  extension.SetExtensionInformation("BuiltinVariables", "Variables", "Vars.", "Florian", "MIT");
+  extension
+      .AddAction("ModVarScene",
+                 _("Change number variable"),
+                 _("Modify the number value of a scene variable."),
+                 _("the scene variable _PARAM0_"),
+                 _("Scene variables"),
+                 "res/actions/var24.png",
+                 "res/actions/var.png")
+      .AddParameter("scenevar", _("Variable"))
+      .UseStandardOperatorParameters("number",
+                                     ParameterOptions::MakeNewOptions());
+}
+}  // namespace gd
+`;
+    const parsed = parseExtensionSource(source);
+    const action = parsed.instructions.find((entry) => entry.type === 'ModVarScene');
+    assert.ok(action);
+    assert.deepEqual(
+      action.parameters.map((parameter) => parameter.type),
+      ['scenevar', 'operator', 'number'],
+    );
+  });
+
+  it('1.1 #31: UseStandardParameters feeds condition/action but not the expression (FontSize)', () => {
+    const source = `
+namespace gd {
+void DeclareTextObjectExtension(gd::PlatformExtension& extension) {
+  extension.SetExtensionInformation("TextObject", "Text object", "Text.", "Florian", "MIT");
+  gd::ObjectMetadata& obj = extension.AddObject<TextObject>("Text", _("Text"), _("Displays text."), "icon.png");
+  obj.AddExpressionAndConditionAndAction("number", "FontSize",
+                                        _("Font size"),
+                                        _("the font size of a text object"),
+                                        _("the font size"),
+                                        "", "res/conditions/characterSize24.png")
+      .AddParameter("object", _("Object"), "Text")
+      .UseStandardParameters("number", gd::ParameterOptions::MakeNewOptions());
+}
+}  // namespace gd
+`;
+    const parsed = parseExtensionSource(source);
+    const expression = parsed.instructions.find(
+      (entry) => entry.type === 'FontSize' && entry.kind === 'expression',
+    );
+    const condition = parsed.instructions.find(
+      (entry) => entry.type === 'FontSize' && entry.kind === 'condition',
+    );
+    const action = parsed.instructions.find((entry) => entry.type === 'FontSize' && entry.kind === 'action');
+    assert.ok(expression && condition && action);
+    assert.deepEqual(
+      expression.parameters.map((parameter) => parameter.type),
+      ['object'],
+    );
+    assert.deepEqual(
+      condition.parameters.map((parameter) => parameter.type),
+      ['object', 'relationalOperator', 'number'],
+    );
+    assert.deepEqual(
+      action.parameters.map((parameter) => parameter.type),
+      ['object', 'operator', 'number'],
+    );
+  });
+
+  it('1.1 #31: JS useStandardRelationalOperatorParameters expands too (TileMap style)', () => {
+    const source = `
+module.exports = {
+  createExtension: function (_, gd) {
+    const extension = new gd.PlatformExtension();
+    extension.setExtensionInformation('TileMap', _('Tile Map'), _('Tiles.'), 'GDevelop', 'MIT');
+    extension.addCondition('CompareTileSize',
+                           _('Tile size'),
+                           _('Compare tile size.'),
+                           _('the tile size'),
+                           '', 'res/conditions/tile.png', 'res/conditions/tile.png')
+      .addParameter('object', _('Object'), 'TileMap::TileMap', false)
+      .useStandardRelationalOperatorParameters('number', gd.ParameterOptions.makeNewOptions());
+  },
+};
+`;
+    const parsed = parseExtensionSource(source);
+    const cond = parsed.instructions.find((entry) => entry.type === 'CompareTileSize');
+    assert.ok(cond);
+    assert.deepEqual(
+      cond.parameters.map((parameter) => parameter.type),
+      ['object', 'relationalOperator', 'number'],
+    );
+  });
 });

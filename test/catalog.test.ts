@@ -182,4 +182,80 @@ describe('catalogue queries (ticket #15)', () => {
     assert.equal(fullTypeName('DialogueTree', 'Hero'), 'DialogueTree::Hero');
     assert.equal(fullTypeName('DialogueTree', 'BuiltinAdvanced::X'), 'BuiltinAdvanced::X');
   });
+
+  it('1.1 #31: full type respects the engine empty-namespace builtins (Sprite vs Text)', () => {
+    // Miroir de PlatformExtension::SetNameSpace (PlatformExtension.cpp) : ces
+    // extensions n'ont pas de namespace, le type moteur est le nom nu.
+    assert.equal(fullTypeName('Sprite', 'Sprite'), 'Sprite');
+    assert.equal(fullTypeName('BuiltinVariables', 'Foo'), 'Foo');
+    assert.equal(fullTypeName('TextObject', 'Text'), 'TextObject::Text');
+    assert.equal(fullTypeName('DialogueTree', 'Hero'), 'DialogueTree::Hero');
+  });
+
+  it('1.1 #31: natives Sprite/Text are listed/described and VarScene exposes 3 params', async () => {
+    const { describeObject, listObjectTypes } = await import('../src/catalog.js');
+    const catalog = new Catalog(
+      makeFixtureSource({
+        files: [
+          {
+            path: 'Core/GDCore/Extensions/Builtin/SpriteExtension/SpriteExtension.cpp',
+            source: `
+namespace gd {
+void ImplementsSpriteExtension(gd::PlatformExtension& extension) {
+  extension.SetExtensionInformation("Sprite", "Sprite", "Sprites.", "Florian", "MIT");
+  gd::ObjectMetadata& obj = extension.AddObject<SpriteObject>("Sprite", _("Sprite"), _("Animated."), "icon.png");
+}
+}  // namespace gd
+`,
+          },
+          {
+            path: 'Extensions/TextObject/Extension.cpp',
+            source: `
+void DeclareTextObjectExtension(gd::PlatformExtension& extension) {
+  extension.SetExtensionInformation("TextObject", "Text object", "Text.", "Florian", "MIT");
+  gd::ObjectMetadata& obj = extension.AddObject<TextObject>("Text", _("Text"), _("Displays."), "icon.png");
+}
+`,
+          },
+          {
+            path: 'Core/GDCore/Extensions/Builtin/VariablesExtension.cpp',
+            source: `
+namespace gd {
+void ImplementsVariablesExtension(gd::PlatformExtension& extension) {
+  extension.SetExtensionInformation("BuiltinVariables", "Variables", "Vars.", "Florian", "MIT");
+  extension.AddCondition("VarScene", _("Number variable"), _("Compare."), _("Var _PARAM0_"), _("Vars"), "a.png", "b.png")
+      .AddParameter("scenevar", _("Variable"))
+      .UseStandardRelationalOperatorParameters("number", ParameterOptions::MakeNewOptions());
+}
+}  // namespace gd
+`,
+          },
+        ],
+      }),
+    );
+    const objects = await listObjectTypes(catalog, {});
+    assert.equal(objects.pin.ref, 'v5.6.282');
+    assert.equal(objects.pin.sha, 'abc123tree');
+    const types = objects.types.map((entry) => entry.type).sort();
+    assert.deepEqual(types, ['Sprite', 'TextObject::Text']);
+
+    const sprite = await describeObject(catalog, { type: 'Sprite' });
+    assert.equal(sprite.found, true);
+    assert.equal(sprite.entry?.extension, 'Sprite');
+
+    const text = await describeObject(catalog, { type: 'TextObject::Text' });
+    assert.equal(text.found, true);
+    assert.equal(text.entry?.extension, 'TextObject');
+
+    const described = await describeInstructions(catalog, { type: 'VarScene' });
+    assert.equal(described.found, true);
+    assert.equal(described.matches[0]?.parameters.length, 3);
+    assert.deepEqual(
+      described.matches[0]?.parameters.map((parameter) => parameter.type),
+      ['scenevar', 'relationalOperator', 'number'],
+    );
+    // Le pin et le sha restent rappelés sur chaque réponse.
+    assert.equal(described.pin.ref, 'v5.6.282');
+    assert.equal(described.pin.sha, 'abc123tree');
+  });
 });

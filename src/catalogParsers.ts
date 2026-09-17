@@ -70,7 +70,19 @@ const PARAMETER_METHODS = new Set([
   'addCodeOnlyParameter',
 ]);
 
-const METHOD_CALL_RE = /\.([A-Za-z][A-Za-z0-9_]*)\s*\(/g;
+const STANDARD_OPERATOR_METHODS = new Set([
+  'UseStandardOperatorParameters',
+  'useStandardOperatorParameters',
+]);
+
+const STANDARD_RELATIONAL_METHODS = new Set([
+  'UseStandardRelationalOperatorParameters',
+  'useStandardRelationalOperatorParameters',
+]);
+
+const STANDARD_GENERIC_METHODS = new Set(['UseStandardParameters', 'useStandardParameters']);
+
+const METHOD_CALL_RE = /\.([A-Za-z][A-Za-z0-9_]*)\s*(?:<[^()<>]*>\s*)?\(/g;
 
 /** Position of the `)` matching the `(` at `openPos`, skipping strings and comments. */
 function findMatchingParen(source: string, openPos: number): number {
@@ -214,6 +226,46 @@ function toParameter(args: string[]): CatalogParameter | null {
   };
 }
 
+/**
+ * 1.1 #31 : le second argument des `UseStandard*` est un
+ * `ParameterOptions::MakeNewOptions()` éventuellement chaîné avec
+ * `.SetDescription(_("…"))`. On en extrait la description custom quand elle
+ * existe, sinon le moteur retombe sur ses libellés par défaut.
+ */
+function extractOptionsDescription(optionsArg: string | undefined): string | undefined {
+  if (!optionsArg) return undefined;
+  const i18n = /_\s*\(\s*["']((?:[^"'\\]|\\.)*)["']\s*\)/.exec(optionsArg);
+  if (i18n) return i18n[1];
+  const quoted = /["']((?:[^"'\\]|\\.)*)["']/.exec(optionsArg);
+  if (quoted) {
+    const candidate = quoted[1] as string;
+    // `MakeNewOptions()` seul ne contient aucun littéral ; un littéral trouvé
+    // ici vient forcément d'un `SetDescription` / `setDescription`.
+    if (candidate !== '') return candidate;
+  }
+  return undefined;
+}
+
+/** Expansion moteur de `UseStandardOperatorParameters` (InstructionMetadata.cpp). */
+function standardOperatorParams(valueType: string, optionsArg: string | undefined): CatalogParameter[] {
+  if (valueType === 'boolean') {
+    return [{ type: 'yesorno', description: extractOptionsDescription(optionsArg) ?? 'New value' }];
+  }
+  return [
+    { type: 'operator', description: "Modification's sign", extraInfo: valueType },
+    { type: valueType, description: extractOptionsDescription(optionsArg) ?? 'Value' },
+  ];
+}
+
+/** Expansion moteur de `UseStandardRelationalOperatorParameters` (InstructionMetadata.cpp). */
+function standardRelationalParams(valueType: string, optionsArg: string | undefined): CatalogParameter[] {
+  if (valueType === 'boolean') return [];
+  return [
+    { type: 'relationalOperator', description: 'Sign of the test', extraInfo: valueType },
+    { type: valueType, description: extractOptionsDescription(optionsArg) ?? 'Value to compare' },
+  ];
+}
+
 function flush(out: ParsedInstruction[], instructions: (ParsedInstruction | null)[]): void {
   for (const instruction of instructions) {
     if (instruction && instruction.type) out.push(instruction);
@@ -323,6 +375,47 @@ export function parseExtensionSource(source: string): ParsedExtension {
         current.parameters.push(parameter);
         for (const mirror of mirrors) mirror.parameters.push(parameter);
       }
+      continue;
+    }
+
+    if (current && (STANDARD_OPERATOR_METHODS.has(call.methodName) || STANDARD_RELATIONAL_METHODS.has(call.methodName))) {
+      const valueType = extractString(args[0]);
+      if (!valueType) continue;
+      const expanded = STANDARD_OPERATOR_METHODS.has(call.methodName)
+        ? standardOperatorParams(valueType, args[1])
+        : standardRelationalParams(valueType, args[1]);
+      for (const target of [current, ...mirrors]) target.parameters.push(...expanded);
+      continue;
+    }
+
+    if (current && STANDARD_GENERIC_METHODS.has(call.methodName)) {
+      // `UseStandardParameters` n'existe que sur les déclarations multiples
+      // (AddExpressionAndCondition[AndAction]) : l'expression ne reçoit rien,
+      // la condition reçoit l'expansion relationnelle, l'action l'expansion
+      // opérateur (MultipleInstructionMetadata.h).
+      const valueType = extractString(args[0]);
+      if (!valueType) continue;
+      const optionsArg = args[1];
+      if (current.kind === 'expression' || current.kind === 'strExpression') {
+        for (const mirror of mirrors) {
+          if (mirror.kind === 'condition') {
+            mirror.parameters.push(...standardRelationalParams(valueType, optionsArg));
+          } else if (mirror.kind === 'action') {
+            mirror.parameters.push(...standardOperatorParams(valueType, optionsArg));
+          } else {
+            mirror.parameters.push(...standardRelationalParams(valueType, optionsArg));
+          }
+        }
+      } else {
+        // Garde-fou : `UseStandardParameters` sur une instruction simple —
+        // on dispatche selon le kind de chaque cible.
+        for (const target of [current, ...mirrors]) {
+          if (target.kind === 'action') target.parameters.push(...standardOperatorParams(valueType, optionsArg));
+          else if (target.kind === 'condition')
+            target.parameters.push(...standardRelationalParams(valueType, optionsArg));
+        }
+      }
+      continue;
     }
   }
   flush(instructions, [current, ...mirrors]);

@@ -123,8 +123,43 @@ export function describeCatalogFile(path: string): FileDescriptor | null {
 }
 
 /** Full engine type for an extension-declared type (`<extension>::<name>`). */
+/**
+ * 1.1 #31 : namespace moteur réel (PlatformExtension::SetNameSpace,
+ * PlatformExtension.cpp). Ces extensions n'ont pas de namespace : le type
+ * moteur est le nom nu (`Sprite`, pas `Sprite::Sprite` ; `VarScene`, pas
+ * `BuiltinVariables::VarScene`). Toutes les autres sont préfixées
+ * (`TextObject::Text`, `DialogueTree::Hero`).
+ */
+const NO_NAMESPACE_EXTENSIONS = new Set([
+  'Sprite',
+  'BuiltinObject',
+  'BuiltinAudio',
+  'BuiltinMouse',
+  'BuiltinKeyboard',
+  'BuiltinJoystick',
+  'BuiltinTime',
+  'BuiltinFile',
+  'BuiltinInterface',
+  'BuiltinVariables',
+  'BuiltinCamera',
+  'BuiltinWindow',
+  'BuiltinNetwork',
+  'BuiltinScene',
+  'BuiltinAdvanced',
+  'BuiltinCommonConversions',
+  'BuiltinStringInstructions',
+  'BuiltinMathematicalTools',
+  'Effects',
+  'CommonDialogs',
+]);
+
+export function extensionNamespace(extension: string): string {
+  return NO_NAMESPACE_EXTENSIONS.has(extension) ? '' : `${extension}::`;
+}
+
 export function fullTypeName(extension: string, name: string): string {
-  return name.includes('::') ? name : `${extension}::${name}`;
+  if (name.includes('::')) return name;
+  return `${extensionNamespace(extension)}${name}`;
 }
 
 function instructionRichness(entry: InstructionEntry): number {
@@ -213,6 +248,9 @@ export function buildCatalogIndex(snapshot: CatalogSourceSnapshot, builtAt: stri
     }
 
     for (const declaration of parsed.typeDeclarations) {
+      // BaseObjectExtension déclare un objet au nom vide (socle, pas un type
+      // instanciable) : on l'ignore pour ne pas indexer un type vide.
+      if (declaration.name === '') continue;
       const entry = declarationToType(declaration, extension, descriptor.source, file.path);
       if (declaration.kind === 'object') {
         objectTypes.push(entry);
