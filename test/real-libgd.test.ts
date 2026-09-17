@@ -56,6 +56,9 @@ describe('real libGD.js runtime', { skip: !LIBGD_PATH }, () => {
       y: 200,
     });
     content.setVariable(deps, { sessionId, target: { scope: 'global' }, name: 'score', value: 0 });
+    // Ticket #36 : le scope Scène porte le Score du jeu de validation —
+    // 0 (number) doit se relire 0 (number), pas "0" (string).
+    content.setVariable(deps, { sessionId, target: { scope: 'scene', scene: 'Niveau1' }, name: 'Score', value: 0 });
 
     const summary = describeProject(deps, { sessionId });
     assert.equal(summary.layoutCount, 1);
@@ -69,6 +72,9 @@ describe('real libGD.js runtime', { skip: !LIBGD_PATH }, () => {
     assert.equal(scene?.instances[0]?.y, 200);
     assert.deepEqual(scene?.objects[0]?.variables, { vie: 3 });
     assert.deepEqual(summary.content.globalVariables, { score: 0 });
+    // Ticket #36 : typeof strict — deepEqual seul ne distinguerait pas 0 de "0".
+    assert.strictEqual(typeof scene?.variables['Score'], 'number');
+    assert.deepEqual(scene?.variables, { Score: 0 });
 
     // Behaviors update after creation; bulk instance ops.
     content.updateBehavior(deps, {
@@ -105,6 +111,18 @@ describe('real libGD.js runtime', { skip: !LIBGD_PATH }, () => {
     const again = describeProject({ store: reopened, engine: runtime.engine }, { sessionId: opened.sessionId });
     assert.equal(again.content.scenes[0]?.objects[0]?.name, 'Hero');
     assert.deepEqual(again.content.globalVariables, { score: 0 });
+    // Ticket #36 : le typage survit à l'aller-retour disque, en mémoire
+    // comme sur le fichier — la donnée dont ModVarScene +1 a besoin.
+    assert.strictEqual(typeof again.content.scenes[0]?.variables['Score'], 'number');
+    assert.deepEqual(again.content.scenes[0]?.variables, { Score: 0 });
+    const saved = JSON.parse(readFileSync(file, 'utf8')) as {
+      layouts?: { name?: unknown; variables?: { name?: unknown; type?: unknown; value?: unknown }[] }[];
+    };
+    const savedLayout = (saved.layouts ?? []).find((candidate) => candidate.name === 'Niveau1');
+    assert.deepEqual(
+      (savedLayout?.variables ?? []).find((candidate) => candidate.name === 'Score'),
+      { name: 'Score', type: 'number', value: 0 },
+    );
   });
 
   it('refuses unknown types and properties without changing state', async () => {
